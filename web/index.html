@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
+    <title>RoomSenseBoard · 室内环境感知</title>
+  <link rel="icon" href="/static/logo.svg" type="image/svg+xml" />
+  <script src="/static/theme.js"></script>
+    <script src="/static/config.js"></script>
+    <link rel="stylesheet" href="/static/style.css" />
+    <link rel="stylesheet" href="/static/ui/controls.css" />
+    <script src="/static/chart.js" defer></script>
+    <script src="/static/ui/dropdown.js" defer></script>
+  <script src="/static/app.js" defer></script>
+</head>
+
+<body>
+  <section id="loading" class="loading" role="status">
+    <p>正在加载…</p>
+  </section>
+
+  <section id="login" class="login" hidden>
+    <form id="login-form" class="panel login-card">
+      <div class="brand">
+        <!-- 标识占位符：替换 web/logo.svg 即可 -->
+        <img class="brand-logo" src="/static/logo.svg" alt="" width="64" height="64" />
+        <div class="brand-text">
+          <strong>RoomSense</strong>
+          <span>室内环境感知</span>
+        </div>
+      </div>
+        <h1>登录感知面板</h1>
+      <p>请输入管理账号与密码，账号保存在 <code>conf/accounts.json</code>。</p>
+      <label>账号<input id="username" type="text" autocomplete="username" required /></label>
+      <label>密码<input id="password" type="password" autocomplete="current-password" required /></label>
+      <button type="submit" class="primary">登录</button>
+      <p id="login-error" role="alert"></p>
+      <label class="theme-control">
+        <span>外观</span>
+        <select data-theme-select aria-label="外观">
+          <option value="system">跟随系统</option>
+          <option value="light">浅色</option>
+          <option value="dark">深色</option>
+        </select>
+      </label>
+    </form>
+  </section>
+
+  <div id="shell" hidden>
+    <aside>
+      <div class="brand">
+        <img class="brand-logo" src="/static/logo.svg" alt="" width="44" height="44" />
+        <div class="brand-text">
+          <strong>RoomSense</strong>
+          <span>室内环境感知</span>
+        </div>
+      </div>
+      <nav id="navigation" aria-label="主导航">
+        <button data-page="dashboard" class="active">仪表盘</button>
+        <button data-page="nodes">节点</button>
+        <button data-page="alerts">告警<span id="nav-alert-badge" class="badge" hidden></span></button>
+        <button data-page="history">历史数据</button>
+        <button data-page="logs">日志</button>
+        <button data-page="settings">设置</button>
+      </nav>
+      <div id="sidebar-summary" class="sidebar-summary">
+        <div><span>在线节点</span><strong id="sidebar-online">--</strong></div>
+        <div><span>未处理告警</span><strong id="sidebar-alerts">--</strong></div>
+      </div>
+      <div class="sidebar-footer">
+        <label class="theme-control">
+          <span>外观</span>
+          <select data-theme-select aria-label="外观">
+            <option value="system">跟随系统</option>
+            <option value="light">浅色</option>
+            <option value="dark">深色</option>
+          </select>
+        </label>
+        <button id="logout">退出登录</button>
+      </div>
+    </aside>
+
+    <main>
+      <header>
+        <h1 id="page-title">仪表盘</h1>
+        <span id="connection" role="status">正在连接…</span>
+      </header>
+      <div id="notice" hidden>
+        <span id="notice-message" role="status"></span>
+        <button id="notice-close" type="button" aria-label="关闭提示" title="关闭提示">×</button>
+      </div>
+
+      <section id="dashboard" class="page">
+        <div id="status-cards" class="cards"></div>
+
+        <div class="panel chart-panel">
+          <div class="panel-head">
+            <h2>实时趋势</h2>
+            <div class="panel-actions">
+              <div id="live-metrics" class="metric-chips" role="group" aria-label="趋势指标（最多同时选择 2 个）"></div>
+              <label class="inline">节点<select id="live-node" aria-label="实时曲线节点"></select></label>
+              <span id="live-updated" class="hint">等待数据…</span>
+            </div>
+          </div>
+          <div class="chart-wrap">
+            <canvas id="live-chart" role="img" aria-label="最近监控指标曲线"></canvas>
+          </div>
+          <div id="live-legend" class="chart-legend"></div>
+        </div>
+
+        <div class="split">
+          <section class="panel">
+            <div class="panel-head">
+              <h2>节点状态</h2>
+              <div class="panel-actions">
+                <span id="nodes-updated" class="hint"></span>
+                <button id="dashboard-refresh">刷新</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>节点</th>
+                    <th>位置</th>
+                    <th>状态</th>
+                    <th>温度</th>
+                    <th>湿度</th>
+                    <th>CO₂</th>
+                    <th>最后上报</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="dashboard-node-rows"></tbody>
+              </table>
+            </div>
+          </section>
+          <section class="panel">
+            <div class="panel-head">
+              <h2>最近告警</h2>
+              <button id="dashboard-alerts">查看全部</button>
+            </div>
+            <ul id="recent-alerts" class="alert-list"></ul>
+          </section>
+        </div>
+
+        <section class="panel runtime-summary">
+          <h2>运行状态</h2>
+          <div id="runtime-grid" class="kv-grid"></div>
+          <div class="toolbar">
+            <button id="refresh-all">刷新数据</button>
+            <button id="ack-all" class="primary">确认全部告警</button>
+            <span id="runtime-note" class="hint"></span>
+          </div>
+        </section>
+      </section>
+
+      <section id="nodes" class="page" hidden>
+        <div class="toolbar">
+          <label class="inline">搜索<input id="node-search" type="search" placeholder="名称 / 位置 / ID" /></label>
+          <button id="refresh-nodes">刷新</button>
+          <span id="nodes-note" class="hint"></span>
+        </div>
+        <div class="panel table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>节点</th>
+                <th>位置</th>
+                <th>状态</th>
+                <th>温度</th>
+                <th>湿度</th>
+                <th>CO₂</th>
+                <th>PM2.5</th>
+                <th>噪声</th>
+                <th>电量</th>
+                <th>信号</th>
+                <th>累计上报</th>
+                <th>最后上报</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="node-rows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="alerts" class="page" hidden>
+        <div class="toolbar">
+          <label class="inline">状态
+            <select id="alert-filter">
+              <option value="active">活跃（未处理 + 已确认）</option>
+              <option value="open">未处理</option>
+              <option value="acknowledged">已确认</option>
+              <option value="resolved">已恢复</option>
+              <option value="all">全部</option>
+            </select>
+          </label>
+          <button id="refresh-alerts">刷新</button>
+          <button id="ack-all-alerts" class="primary">全部确认</button>
+          <span id="alert-count" class="hint"></span>
+        </div>
+        <div id="alert-cards" class="alert-cards"></div>
+      </section>
+
+      <section id="history" class="page" hidden>
+        <div class="toolbar">
+          <label class="inline">节点<select id="history-node" aria-label="历史数据节点"></select></label>
+          <label class="inline">指标
+            <select id="history-metric">
+              <option value="temperature">温度</option>
+              <option value="humidity">湿度</option>
+              <option value="co2">CO₂</option>
+              <option value="pm25">PM2.5</option>
+              <option value="noise">噪声</option>
+              <option value="light">光照</option>
+            </select>
+          </label>
+          <label class="inline">范围
+            <select id="history-range">
+              <option value="30m">最近 30 分钟</option>
+              <option value="1h">最近 1 小时</option>
+              <option value="6h">最近 6 小时</option>
+              <option value="24h" selected>最近 24 小时</option>
+              <option value="7d">最近 7 天</option>
+              <option value="30d">最近 30 天</option>
+            </select>
+          </label>
+          <button id="history-refresh">刷新</button>
+          <button id="history-export">导出 CSV</button>
+          <span id="history-note" class="hint"></span>
+        </div>
+        <div id="history-stats" class="cards stats-cards"></div>
+        <div class="panel chart-panel">
+          <div class="panel-head">
+            <h2 id="history-title">历史曲线</h2>
+            <span id="history-range-note" class="hint"></span>
+          </div>
+          <div class="chart-wrap">
+            <canvas id="history-chart" role="img" aria-label="历史数据曲线"></canvas>
+          </div>
+          <div id="history-legend" class="chart-legend"></div>
+        </div>
+      </section>
+
+      <section id="logs" class="page" hidden>
+        <div class="toolbar">
+          <div class="log-filter-control">
+            <span>日志级别</span>
+            <details id="log-filter">
+              <summary id="log-level" aria-label="日志级别：INFO、WARN、ERROR、FATAL">
+                INFO、WARN、ERROR、FATAL
+              </summary>
+              <div id="log-level-options" role="group" aria-label="选择日志级别">
+                <label class="check"><input id="log-all" type="checkbox" />全部</label>
+                <label class="check"><input type="checkbox" value="TRACE" />TRACE</label>
+                <label class="check"><input type="checkbox" value="DEBUG" />DEBUG</label>
+                <label class="check"><input type="checkbox" value="NOTE" />NOTE</label>
+                <label class="check"><input type="checkbox" value="INFO" checked />INFO</label>
+                <label class="check"><input type="checkbox" value="WARN" checked />WARN</label>
+                <label class="check"><input type="checkbox" value="ERROR" checked />ERROR</label>
+                <label class="check"><input type="checkbox" value="FATAL" checked />FATAL</label>
+              </div>
+            </details>
+          </div>
+          <label class="check"><input id="log-scroll" type="checkbox" checked />自动滚动</label>
+          <span id="log-count"></span>
+        </div>
+        <div id="log-output" class="output panel" role="log" aria-label="RoomSenseBoard 日志"></div>
+      </section>
+
+      <section id="settings" class="page" hidden>
+        <form id="settings-form">
+          <section class="panel">
+            <h2>告警阈值</h2>
+            <p class="hint">超过上限触发警告，越过严重阈值升级为严重告警；回落到阈值内（含回差）自动恢复。</p>
+            <div class="form-grid">
+              <label>温度下限（°C）<input id="set-temp-low" type="number" step="0.5" /></label>
+              <label>温度上限（°C）<input id="set-temp-high" type="number" step="0.5" /></label>
+              <label>温度严重下限（°C）<input id="set-temp-critical-low" type="number" step="0.5" /></label>
+              <label>温度严重上限（°C）<input id="set-temp-critical-high" type="number" step="0.5" /></label>
+              <label>湿度下限（%RH）<input id="set-humidity-low" type="number" step="1" /></label>
+              <label>湿度上限（%RH）<input id="set-humidity-high" type="number" step="1" /></label>
+              <label>湿度严重下限（%RH）<input id="set-humidity-critical-low" type="number" step="1" /></label>
+              <label>湿度严重上限（%RH）<input id="set-humidity-critical-high" type="number" step="1" /></label>
+              <label>CO₂ 上限（ppm）<input id="set-co2-high" type="number" step="50" /></label>
+              <label>CO₂ 严重上限（ppm）<input id="set-co2-critical-high" type="number" step="50" /></label>
+              <label>离线判定（秒）<input id="set-offline" type="number" min="15" max="3600" step="5" /></label>
+              <label>数据保留（天）<input id="set-retention" type="number" min="1" max="365" /></label>
+            </div>
+            <div class="toolbar">
+              <button type="submit" class="primary">保存设置</button>
+              <button type="button" id="settings-reload">重新加载</button>
+              <span id="settings-note" class="hint"></span>
+            </div>
+          </section>
+        </form>
+
+        <section class="panel">
+          <h2>设备接入</h2>
+          <p class="hint">
+            RA4M2 节点通过 HTTP POST 上报 JSON；下面的地址与节点密钥可以直接写进固件配置。
+            同一局域网内请把 <code>127.0.0.1</code> 换成本机实际 IP。
+          </p>
+          <div id="device-info" class="kv-grid"></div>
+          <div class="code-block">
+            <pre id="ingest-example"></pre>
+          </div>
+          <div class="toolbar">
+            <button id="copy-ingest">复制上报地址</button>
+            <button id="copy-device-key">复制节点密钥</button>
+            <button id="regen-device-key" class="danger">重新生成节点密钥</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>账号安全</h2>
+          <p class="hint">
+            面板使用账号密码登录，密码以 PBKDF2-HMAC-SHA256 派生结果保存在
+            <code>conf/accounts.json</code>，不保存明文。修改密码后其他浏览器上的会话会立即失效。
+          </p>
+          <div id="account-info" class="kv-grid"></div>
+          <form id="password-form">
+            <div class="form-grid">
+              <label>当前密码<input id="current-password" type="password" autocomplete="current-password"
+                  required /></label>
+              <label>新密码<input id="new-password" type="password" autocomplete="new-password" required /></label>
+              <label>确认新密码<input id="confirm-password" type="password" autocomplete="new-password" required /></label>
+            </div>
+            <div class="toolbar">
+              <button type="submit" class="primary">修改密码</button>
+              <span id="password-note" class="hint"></span>
+            </div>
+          </form>
+        </section>
+
+        <section class="panel">
+          <h2>关于</h2>
+          <div id="about-info" class="kv-grid"></div>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="node-dialog" tabindex="-1" aria-labelledby="node-title">
+    <div class="dialog-title">
+      <h2 id="node-title">节点详情</h2>
+      <button type="button" data-close="node-dialog" aria-label="关闭">×</button>
+    </div>
+    <div id="node-summary" class="kv-grid"></div>
+    <div class="chart-wrap small">
+      <canvas id="node-chart" role="img" aria-label="节点最近温度与湿度曲线"></canvas>
+    </div>
+    <form id="node-form" class="form-grid">
+      <label>名称<input id="node-name" maxlength="64" /></label>
+      <label>位置<input id="node-room" maxlength="64" /></label>
+      <div class="wide toolbar">
+        <button type="submit" class="primary">保存节点信息</button>
+        <button type="button" id="node-delete" class="danger">删除节点</button>
+        <span id="node-note" class="hint"></span>
+      </div>
+    </form>
+    <h3>最近告警</h3>
+    <ul id="node-alerts" class="alert-list"></ul>
+  </dialog>
+
+  <dialog id="delete-dialog" tabindex="-1" aria-labelledby="delete-title">
+    <div class="dialog-title">
+      <h2 id="delete-title">删除节点</h2>
+      <button type="button" data-close="delete-dialog" aria-label="关闭">×</button>
+    </div>
+    <p id="delete-summary"></p>
+    <label class="check">
+      <input id="delete-purge" type="checkbox" checked />同时删除历史数据（读数与告警）
+    </label>
+    <p id="delete-note" class="hint"></p>
+    <div class="dialog-actions">
+      <button type="button" data-close="delete-dialog">取消</button>
+      <button type="button" id="delete-confirm" class="danger">删除</button>
+    </div>
+  </dialog>
+</body>
+
+</html>

@@ -1,0 +1,238 @@
+/* 自绘控件层样式（web/ui/）。
+
+   这里只放“原生控件的外观或弹出层由浏览器/系统绘制、无法用 CSS 统一到面板主题”的实现：
+   - 下拉选择器（配合 ui/dropdown.js，JS 生效后才隐藏原生 select）；
+   - 复选框（纯 CSS，保留原生 input 的语义、键盘与表单行为）；
+   - 折叠面板标记（纯 CSS，隐藏默认三角后自绘雪佛龙）。
+
+   主题变量与页面布局仍在 web/style.css 中，本文件在其后加载，可安全覆盖同名规则。 */
+
+/* --------------------------------------------------------------- 下拉选择器 */
+.select {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+}
+/* 仅在 JS 接管后才会被加上该类，未执行脚本时仍使用原生下拉。 */
+.select-native {
+  display: none;
+}
+.select-trigger {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 30px 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.select-trigger::after {
+  content: '';
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: translateY(-70%) rotate(45deg);
+  pointer-events: none;
+}
+.select-trigger:hover:not(:disabled) {
+  background: var(--hover);
+}
+.select-trigger[aria-expanded='true'] {
+  border-color: var(--accent);
+}
+.select.is-disabled .select-trigger {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.select-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.select-menu {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 100%;
+  max-width: min(320px, 80vw);
+  max-height: 280px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 5px;
+  list-style: none;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  box-shadow: var(--shadow-dialog);
+}
+.select-menu.drop-up {
+  top: auto;
+  bottom: calc(100% + 6px);
+}
+.select-option {
+  padding: 7px 10px;
+  border-radius: 5px;
+  color: var(--text);
+  font-size: 14px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.select-option.is-active {
+  background: var(--hover);
+}
+.select-option.is-selected {
+  color: var(--selected-text);
+  background: var(--selected-bg);
+  font-weight: 600;
+}
+.select-option.disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+.theme-control .select {
+  width: auto;
+}
+.theme-control .select-trigger {
+  min-height: 32px;
+  padding: 5px 28px 5px 8px;
+  font-size: 13px;
+}
+label.inline .select {
+  min-width: 150px;
+}
+
+/* ------------------------------------------------------------------ 复选框 */
+input[type='checkbox'] {
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-grid;
+  place-content: center;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  padding: 0;
+  flex-shrink: 0;
+  border: 1.5px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease;
+}
+input[type='checkbox']::before {
+  content: '';
+  width: 10px;
+  height: 10px;
+  transform: scale(0);
+  transition: transform 120ms ease;
+  background: #fff;
+  clip-path: polygon(14% 46%, 0 62%, 38% 100%, 100% 18%, 82% 0%, 36% 66%);
+}
+input[type='checkbox']:hover:not(:disabled, :checked) {
+  border-color: var(--accent);
+}
+input[type='checkbox']:checked,
+input[type='checkbox']:indeterminate {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+input[type='checkbox']:checked::before {
+  transform: scale(1);
+}
+input[type='checkbox']:indeterminate::before {
+  width: 10px;
+  height: 2px;
+  clip-path: none;
+  transform: scale(1);
+}
+input[type='checkbox']:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+input[type='checkbox']:focus-visible {
+  outline: 3px solid var(--brand);
+  outline-offset: 2px;
+}
+
+/* -------------------------------------------------------------- 折叠面板标记 */
+summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  list-style: none;
+}
+summary::marker {
+  content: '';
+}
+summary::-webkit-details-marker {
+  display: none;
+}
+summary::before {
+  content: '';
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  margin-left: 2px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 120ms ease;
+}
+details[open] > summary::before {
+  transform: rotate(45deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  input[type='checkbox'],
+  input[type='checkbox']::before,
+  summary::before {
+    transition: none;
+  }
+}
+
+/* ------------------------------------------------------------ 指标筛选气泡 */
+.metric-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.metric-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+.metric-chip:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.metric-chip[aria-pressed='true'] {
+  border-color: var(--accent);
+  background: var(--primary-bg);
+  color: var(--brand);
+  font-weight: 600;
+}
+.metric-chip .swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}

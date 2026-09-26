@@ -1,0 +1,82 @@
+{
+    "server": {
+        "host": "127.0.0.1",
+        "port": 20500,
+        "accounts_path": "./conf/accounts.json",
+        "session_hours": 12,
+        "cors_origins": [],
+        "name": "RoomSenseBoard"
+    },
+    "storage": {
+        "db_path": "./data/roomsense.db",
+        "retention_days": 30,
+        "live_window_minutes": 30
+    },
+    "web": {
+        "static_dir": "./web"
+    },
+    "device": {
+        "key_path": "./data/device_key.txt",
+        "offline_timeout": 90,
+        "max_batch": 256
+    },
+    "alerts": {
+        "temperature": {
+            "low": 18.0,
+            "high": 28.0,
+            "critical_low": 12.0,
+            "critical_high": 32.0,
+            "hysteresis": 0.5
+        },
+        "humidity": {
+            "low": 30.0,
+            "high": 70.0,
+            "critical_low": 20.0,
+            "critical_high": 85.0,
+            "hysteresis": 2.0
+        },
+        "co2": {
+            "high": 1000.0,
+            "critical_high": 1500.0,
+            "hysteresis": 50.0
+        }
+    },
+    "simulator": {
+        "enable": true,
+        "interval": 5.0,
+        "seed": 20260926,
+        "devices": [
+            {
+                "device_id": "classroom-301",
+                "name": "301 教室",
+                "room": "教学楼 3F",
+                "profile": "classroom"
+            },
+            {
+                "device_id": "office-201",
+                "name": "201 办公室",
+                "room": "行政楼 2F",
+                "profile": "office"
+            },
+            {
+                "device_id": "meeting-a",
+                "name": "A 会议室",
+                "room": "行政楼 1F",
+                "profile": "meeting",
+                "offline_demo": true
+            },
+            {
+                "device_id": "lab-3f",
+                "name": "3F 实验室",
+                "room": "实验楼 3F",
+                "profile": "lab"
+            },
+            {
+                "device_id": "server-room-1f",
+                "name": "1F 机房",
+                "room": "信息楼 1F",
+                "profile": "server"
+            }
+        ]
+    }
+}
