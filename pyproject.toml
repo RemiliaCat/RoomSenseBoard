@@ -1,0 +1,14 @@
+[project]
+name = "roomsenseboard"
+version = "0.1.0"
+description = "RoomSenseBoard 室内环境感知与监控系统"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+
+# RoomSenseBoard 目前只使用 Python 标准库，运行时没有第三方依赖。
+dependencies = []
+
+[tool.uv]
+# 这是一个可直接运行的应用项目，不需要作为 Python 包安装。
+package = false

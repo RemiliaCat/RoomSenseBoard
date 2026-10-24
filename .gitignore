@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.venv
 
 # 运行期数据与凭据
 conf/accounts.json
