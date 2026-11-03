@@ -1,6 +1,17 @@
-'''RoomSenseBoard 核心测试（标准库 unittest，无需额外依赖）。
+# -*- encoding: utf-8 -*-
+r'''
+    ____                       _____
+   / __ \____  ____  ____ ___ / ___/___  ____  ________
+  / /_/ / __ \/ __ \/ __ `__ \\__ \/ _ \/ __ \/ ___/ _ \
+ / _, _/ /_/ / /_/ / / / / / /__/ /  __/ / / (__  )  __/
+/_/ |_|\____/\____/_/ /_/ /_/____/\___/_/ /_/____/\___/
 
-运行：``python -m unittest discover -s tests -v``
+@File      :   tests/test_core.py
+@Author    :   RmCat
+@Contact   :   RemiliaCatNero@gmail.com
+@License   :   AGPL
+@Copyright :   (C) 2026, RoomSense-Team
+@Desc      :   核心测试（标准库 unittest）。运行：python -m unittest discover -s tests -v
 '''
 
 from __future__ import annotations
@@ -14,7 +25,9 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest import mock
 
+from roomsense import assets, netinfo
 from roomsense.api.panel import PanelHTTPServer
 from roomsense.app import App
 from roomsense.config import DEFAULT_CONFIG, load_config, read_or_create_secret
@@ -95,7 +108,6 @@ class StorageTest(unittest.TestCase):
         self.assertAlmostEqual(rows[0]['light'], 302.0)
 
     def test_legacy_database_gets_new_columns(self) -> None:
-        '''旧版本数据库缺少 pm25/noise 列时，打开存储应自动补列且不影响写读。'''
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'legacy.db'
             connection = sqlite3.connect(path)
@@ -252,6 +264,14 @@ class GatewayTest(unittest.TestCase):
         updated = self.gateway.update_settings({'offline_timeout': 1})
         self.assertEqual(updated['offline_timeout'], 15)
 
+    def test_settings_accepts_public_url(self) -> None:
+        updated = self.gateway.update_settings({'public_url': 'panel.example.com:20500/'})
+        self.assertEqual(updated['public_url'], 'http://panel.example.com:20500')
+        cleared = self.gateway.update_settings({'public_url': ''})
+        self.assertEqual(cleared['public_url'], '')
+        with self.assertRaises(ValidationError):
+            self.gateway.update_settings({'public_url': 'ftp://panel.example.com'})
+
     def test_normalize_rejects_bad_values(self) -> None:
         with self.assertRaises(ValidationError):
             normalize_reading({'device_id': 'bad id', 'temperature': 20.0})
@@ -305,7 +325,6 @@ class AccountTest(unittest.TestCase):
         self.assertEqual(username, 'admin')
         self.assertIsNotNone(password)
         self.assertTrue(self.store.verify('admin', password or ''))
-        # 再次调用不会重置密码
         self.assertEqual(self.store.ensure_user('admin'), ('admin', None))
 
     def test_password_change_and_unknown_user(self) -> None:
@@ -386,7 +405,6 @@ class SimulatorTest(unittest.TestCase):
                 self.assertIsNotNone(reading['noise'])
 
     def test_tick_isolates_broken_device(self) -> None:
-        '''单个节点出错不应拖垮整轮模拟。'''
         current = time.time()
         broken = self.simulator._states[0]
         broken['baseline'] = None  # 触发 _advance 内部异常
@@ -546,7 +564,6 @@ class HttpApiTest(unittest.TestCase):
         self.assertIn('series', payload)
 
     def test_stream_requires_session_and_pushes_reading(self) -> None:
-        '''SSE 流需要会话，且上报后能收到 reading 事件。'''
         self.assertEqual(self.call('/api/stream')[0], 401)
         status, payload = self.call(
             '/api/login', 'POST', {'username': 'admin', 'password': 'testing-password'}
@@ -621,6 +638,22 @@ class HttpApiTest(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn('下限必须小于上限', payload['error'])
 
+    def test_settings_public_url_changes_reported_ingest_address(self) -> None:
+        headers = self.login()
+        status, payload = self.call('/api/settings', headers=headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload['server']['public_url_source'], 'listen')
+        self.assertTrue(payload['device']['ingest_url'].startswith('http://127.0.0.1:'))
+        status, payload = self.call(
+            '/api/settings', 'PUT', {'public_url': 'https://panel.example.com'}, headers
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload['device']['ingest_url'], 'https://panel.example.com/api/ingest')
+        self.assertEqual(payload['server']['public_url_source'], 'configured')
+        self.assertEqual(payload['settings']['public_url'], 'https://panel.example.com')
+        status, payload = self.call('/api/settings', 'PUT', {'public_url': 'ftp://bad'}, headers)
+        self.assertEqual(status, 400)
+
     def test_cors_preflight_only_allows_configured_origin(self) -> None:
         status, _, headers = self.call(
             '/api/overview', 'OPTIONS', headers={'Origin': 'http://panel.example'}, with_headers=True
@@ -634,5 +667,158 @@ class HttpApiTest(unittest.TestCase):
         self.assertIsNone(headers.get('Access-Control-Allow-Origin'))
 
 
+class NetinfoTest(unittest.TestCase):
+    def test_public_url_is_normalized(self) -> None:
+        self.assertEqual(
+            netinfo.normalize_public_url('panel.example.com:20500'),
+            'http://panel.example.com:20500',
+        )
+        self.assertEqual(
+            netinfo.normalize_public_url('https://panel.example.com/rsb/'),
+            'https://panel.example.com/rsb',
+        )
+        self.assertEqual(netinfo.normalize_public_url('   '), '')
+        for bad in ('ftp://panel.example.com', 'http://panel.example.com/?a=1', 'http:///nohost'):
+            with self.assertRaises(ValueError, msg=bad):
+                netinfo.normalize_public_url(bad)
+
+    def test_join_url_keeps_path_prefix(self) -> None:
+        self.assertEqual(
+            netinfo.join_url('https://panel.example.com/rsb', '/api/ingest'),
+            'https://panel.example.com/rsb/api/ingest',
+        )
+        self.assertEqual(
+            netinfo.join_url('http://127.0.0.1:20500/', 'api/ingest'),
+            'http://127.0.0.1:20500/api/ingest',
+        )
+
+    def test_configured_url_wins_over_detection(self) -> None:
+        endpoint = netinfo.resolve_endpoint('https://panel.example.com', '0.0.0.0', 20500)
+        self.assertEqual(endpoint.base_url, 'https://panel.example.com')
+        self.assertEqual(endpoint.candidates, ('https://panel.example.com',))
+        self.assertEqual(endpoint.source, 'configured')
+
+    def test_wildcard_host_detects_lan_addresses(self) -> None:
+        with mock.patch.object(
+            netinfo, 'local_ipv4_addresses', return_value=['192.168.1.20', '10.0.0.5']
+        ):
+            endpoint = netinfo.resolve_endpoint('', '0.0.0.0', 20500)
+        self.assertEqual(endpoint.base_url, 'http://192.168.1.20:20500')
+        self.assertEqual(
+            endpoint.candidates,
+            ('http://192.168.1.20:20500', 'http://10.0.0.5:20500'),
+        )
+        self.assertEqual(endpoint.source, 'lan')
+
+    def test_specific_listen_host_is_used_as_is(self) -> None:
+        endpoint = netinfo.resolve_endpoint('', '127.0.0.1', 20500)
+        self.assertEqual(endpoint.base_url, 'http://127.0.0.1:20500')
+        self.assertEqual(endpoint.source, 'listen')
+
+    def test_loopback_when_no_address_is_found(self) -> None:
+        with mock.patch.object(netinfo, 'local_ipv4_addresses', return_value=[]):
+            endpoint = netinfo.resolve_endpoint('', '0.0.0.0', 20500)
+        self.assertEqual(endpoint.base_url, 'http://127.0.0.1:20500')
+        self.assertEqual(endpoint.source, 'loopback')
+
+    def test_invalid_configured_url_falls_back_instead_of_crashing(self) -> None:
+        with mock.patch.object(netinfo, 'local_ipv4_addresses', return_value=[]):
+            endpoint = netinfo.resolve_endpoint('ftp://panel.example.com', '0.0.0.0', 20500)
+        self.assertEqual(endpoint.source, 'loopback')
+
+
+class AssetsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.base = root / 'runtime'
+        self.bundle = root / 'bundle'
+        self.base.mkdir()
+        (self.bundle / 'web').mkdir(parents=True)
+        (self.bundle / 'web' / 'index.html').write_text('<html>v1</html>', encoding='utf-8')
+        (self.bundle / 'doc').mkdir()
+        (self.bundle / 'doc' / 'protocol.md').write_text('proto v1', encoding='utf-8')
+        (self.bundle / 'README.md').write_text('readme v1', encoding='utf-8')
+        (self.bundle / 'LICENSE').write_text('license v1', encoding='utf-8')
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def release(self, version: str):
+        report = assets.ensure_assets(
+            version, base_dir=self.base, bundle_dir=self.bundle, frozen=True
+        )
+        self.assertIsNotNone(report)
+        return report
+
+    def marker(self) -> dict:
+        return json.loads((self.base / 'data' / 'assets.json').read_text(encoding='utf-8'))
+
+    def test_first_run_releases_assets_and_default_config(self) -> None:
+        report = self.release('0.1.0')
+        self.assertGreaterEqual(report.created, 5)
+        self.assertEqual(
+            (self.base / 'web' / 'index.html').read_text(encoding='utf-8'), '<html>v1</html>'
+        )
+        self.assertEqual(
+            (self.base / 'doc' / 'protocol.md').read_text(encoding='utf-8'), 'proto v1'
+        )
+        self.assertTrue((self.base / 'data').is_dir())
+        config = json.loads((self.base / 'conf' / 'config.json').read_text(encoding='utf-8'))
+        self.assertFalse(config['simulator']['enable'])
+        self.assertEqual(self.marker()['version'], '0.1.0')
+
+    def test_second_run_with_same_version_does_nothing(self) -> None:
+        self.release('0.1.0')
+        report = self.release('0.1.0')
+        self.assertFalse(report.changed)
+
+    def test_version_change_refreshes_files_the_user_did_not_touch(self) -> None:
+        self.release('0.1.0')
+        (self.bundle / 'web' / 'index.html').write_text('<html>v2</html>', encoding='utf-8')
+        report = self.release('0.2.0')
+        self.assertEqual(report.updated, 1)
+        self.assertEqual(
+            (self.base / 'web' / 'index.html').read_text(encoding='utf-8'), '<html>v2</html>'
+        )
+        self.assertEqual(self.marker()['version'], '0.2.0')
+
+    def test_user_edited_file_survives_version_change(self) -> None:
+        self.release('0.1.0')
+        target = self.base / 'web' / 'index.html'
+        target.write_text('<html>mine</html>', encoding='utf-8')
+        (self.bundle / 'web' / 'index.html').write_text('<html>v2</html>', encoding='utf-8')
+        report = self.release('0.2.0')
+        self.assertEqual(report.updated, 0)
+        self.assertEqual(report.kept, 1)
+        self.assertEqual(target.read_text(encoding='utf-8'), '<html>mine</html>')
+
+    def test_config_is_created_once_and_never_overwritten(self) -> None:
+        self.release('0.1.0')
+        config_path = self.base / 'conf' / 'config.json'
+        config_path.write_text('{"server": {"port": 21000}}', encoding='utf-8')
+        self.release('0.9.0')
+        self.assertEqual(
+            json.loads(config_path.read_text(encoding='utf-8'))['server']['port'], 21000
+        )
+
+    def test_missing_marker_is_rebuilt_without_overwriting(self) -> None:
+        self.release('0.1.0')
+        target = self.base / 'web' / 'index.html'
+        target.write_text('<html>mine</html>', encoding='utf-8')
+        (self.base / 'data' / 'assets.json').unlink()
+        self.release('0.1.0')
+        self.assertEqual(target.read_text(encoding='utf-8'), '<html>mine</html>')
+        self.assertEqual(self.marker()['version'], '0.1.0')
+
+    def test_source_run_does_nothing(self) -> None:
+        report = assets.ensure_assets(
+            '0.1.0', base_dir=self.base, bundle_dir=self.bundle, frozen=False
+        )
+        self.assertIsNone(report)
+        self.assertFalse((self.base / 'conf').exists())
+
+
 if __name__ == '__main__':
     unittest.main()
+

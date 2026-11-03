@@ -1,6 +1,17 @@
-'''管理平面 HTTP 入口：面板静态资源、管理 REST API 与 SSE 实时流。
+# -*- encoding: utf-8 -*-
+r'''
+    ____                       _____
+   / __ \____  ____  ____ ___ / ___/___  ____  ________
+  / /_/ / __ \/ __ \/ __ `__ \\__ \/ _ \/ __ \/ ___/ _ \
+ / _, _/ /_/ / /_/ / / / / / /__/ /  __/ / / (__  )  __/
+/_/ |_|\____/\____/_/ /_/ /_/____/\___/_/ /_/____/\___/
 
-设备上报（``/api/ingest``）在会话鉴权之前交给 :mod:`roomsense.api.ingest` 处理。
+@File      :   roomsense/api/panel.py
+@Author    :   RmCat
+@Contact   :   RemiliaCatNero@gmail.com
+@License   :   AGPL
+@Copyright :   (C) 2026, RoomSense-Team
+@Desc      :   管理平面 HTTP 入口：静态页面、管理 REST API 与 SSE 实时流。
 '''
 
 from __future__ import annotations
@@ -16,6 +27,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from ..app import App
 from ..core.auth import PASSWORD_MIN_LENGTH
+from ..netinfo import join_url, resolve_endpoint
 from ..core.gateway import ValidationError
 from .errors import ApiError
 
@@ -47,8 +59,6 @@ class RequestHandler(BaseHTTPRequestHandler):
     server_version = 'RoomSenseBoard'
     protocol_version = 'HTTP/1.1'
 
-    # ------------------------------------------------------------------ 入口
-
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler 约定
         self._dispatch('GET')
 
@@ -68,7 +78,6 @@ class RequestHandler(BaseHTTPRequestHandler):
         self._dispatch('OPTIONS')
 
     def log_message(self, format: str, *args: Any) -> None:
-        '''请求日志默认不写 stderr，需要排查时用 server.verbose 打开。'''
         if self.server.app.config['server'].get('verbose'):
             super().log_message(format, *args)
 
@@ -101,8 +110,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                 pass
             self._send_json({'ok': False, 'error': '服务器内部错误'}, status=500)
 
-    # ------------------------------------------------------------------ 路由
-
     def _handle_api(self, method: str, path: str, query: dict[str, list[str]]) -> None:
         app = self.app
 
@@ -115,17 +122,15 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
 
         if path == '/api/stream' and method == 'GET':
-            # SSE 自带 token 查询参数鉴权，不经过管理接口的会话检查。
+            # SSE 用 token 查询参数鉴权，不经过会话检查。
             self._serve_stream(query)
             return
 
-        # 设备平面：设备上报不经过面板会话。
         device_response = app.ingest_api.handle(method, path, self.headers, self._read_json)
         if device_response is not None:
             self._send_json(device_response)
             return
 
-        # 以下接口都需要面板登录会话
         username = self._require_session(query)
 
         if path == '/api/overview' and method in ('GET', 'HEAD'):
@@ -254,8 +259,6 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         raise ApiError(404, '接口不存在')
 
-    # ------------------------------------------------------------------ 会话
-
     def _login(self) -> None:
         app = self.app
         client = self.client_address[0] if self.client_address else 'unknown'
@@ -306,8 +309,6 @@ class RequestHandler(BaseHTTPRequestHandler):
         app.storage.add_log('INFO', 'auth', f'账号 {username} 已更新密码，注销其他 {revoked} 个会话')
         self._send_json({'ok': True, 'revoked_sessions': revoked, 'account': app.accounts.describe(username)})
 
-    # ------------------------------------------------------------------ 业务
-
     def _node_detail(self, device_id: str) -> None:
         app = self.app
         node = app.storage.get_node(device_id)
@@ -350,7 +351,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         self._send_json({'ok': True, 'node': node})
 
     def _delete_node(self, device_id: str, query: dict[str, list[str]]) -> None:
-        '''删除节点，``?purge=1`` 时连同历史读数与告警一起删除。'''
+        '''删除节点；purge=True 时连历史读数与告警一起删除。'''
         app = self.app
         purge = (query.get('purge') or ['0'])[0].lower() in ('1', 'true', 'yes', 'on')
         result = app.storage.delete_node(device_id, purge=purge)
@@ -413,14 +414,17 @@ class RequestHandler(BaseHTTPRequestHandler):
         app = self.app
         host, port = self.server.server_address[0], self.server.server_address[1]  # type: ignore[attr-defined]
         status = app.status()
+        settings = app.runtime_settings()
+        endpoint = resolve_endpoint(str(settings.get('public_url') or ''), str(host), int(port))
         return {
             'ok': True,
-            'settings': app.runtime_settings(),
+            'settings': settings,
             'device': {
                 'key': app.device_key,
-                'ingest_url': f'http://{host}:{port}/api/ingest',
-                'offline_timeout': int(app.runtime_settings().get('offline_timeout', 90)),
-                'max_batch': int(app.runtime_settings().get('max_batch', 256)),
+                'ingest_url': join_url(endpoint.base_url, '/api/ingest'),
+                'ingest_urls': [join_url(item, '/api/ingest') for item in endpoint.candidates],
+                'offline_timeout': int(settings.get('offline_timeout', 90)),
+                'max_batch': int(settings.get('max_batch', 256)),
             },
             'server': {
                 'name': status['name'],
@@ -429,11 +433,12 @@ class RequestHandler(BaseHTTPRequestHandler):
                 'simulator': status['simulator'],
                 'host': host,
                 'port': port,
+                'public_url': endpoint.base_url,
+                'public_url_source': endpoint.source,
+                'address_candidates': list(endpoint.candidates),
             },
             'server_time': status['server_time'],
         }
-
-    # --------------------------------------------------------------- SSE 推送
 
     def _serve_stream(self, query: dict[str, list[str]]) -> None:
         app = self.app
@@ -471,8 +476,6 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
         self.wfile.flush()
 
-    # ------------------------------------------------------------ 静态资源
-
     def _serve_static(self, path: str, head_only: bool = False) -> None:
         static_dir = Path(self.app.config['web']['static_dir'])
         if path in ('/', '/index.html'):
@@ -502,14 +505,11 @@ class RequestHandler(BaseHTTPRequestHandler):
         if not head_only:
             self.wfile.write(body)
 
-    # ------------------------------------------------------------ CORS
-
     def _allowed_origins(self) -> list[str]:
         origins = self.app.config['server'].get('cors_origins') or []
         return [str(item).strip() for item in origins if str(item).strip()]
 
     def _cors_headers(self) -> list[tuple[str, str]]:
-        '''面板与接口分离部署时，按白名单回显跨域头。'''
         origin = str(self.headers.get('Origin') or '').strip()
         if not origin or origin not in self._allowed_origins():
             return []
@@ -531,8 +531,6 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.send_header(name, value)
         self.send_header('Content-Length', '0')
         self.end_headers()
-
-    # ------------------------------------------------------------------ 工具
 
     def _session_token(self, query: dict[str, list[str]] | None = None) -> str:
         token = self.headers.get('X-Auth-Token', '')

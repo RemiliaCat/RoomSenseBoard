@@ -1,4 +1,18 @@
-'''设备数据网关：校验上报、写入存储、联动告警并广播实时事件。'''
+# -*- encoding: utf-8 -*-
+r'''
+    ____                       _____
+   / __ \____  ____  ____ ___ / ___/___  ____  ________
+  / /_/ / __ \/ __ \/ __ `__ \\__ \/ _ \/ __ \/ ___/ _ \
+ / _, _/ /_/ / /_/ / / / / / /__/ /  __/ / / (__  )  __/
+/_/ |_|\____/\____/_/ /_/ /_/____/\___/_/ /_/____/\___/
+
+@File      :   roomsense/core/gateway.py
+@Author    :   RmCat
+@Contact   :   RemiliaCatNero@gmail.com
+@License   :   AGPL
+@Copyright :   (C) 2026, RoomSense-Team
+@Desc      :   设备数据网关：校验上报、写入存储、联动告警并广播实时事件。
+'''
 
 from __future__ import annotations
 
@@ -6,6 +20,7 @@ import re
 import time
 from typing import Any, Callable
 
+from ..netinfo import normalize_public_url
 from . import alerts as alert_rules
 from .bus import EventBus
 from .storage import Storage
@@ -22,7 +37,6 @@ FIELD_RANGES: dict[str, tuple[float, float]] = {
     'battery': (0.0, 15.0),
 }
 
-# 至少需要上报其中之一，否则这条数据没有监控意义。
 PRIMARY_FIELDS = ('temperature', 'humidity', 'co2', 'pm25', 'noise')
 
 
@@ -31,7 +45,7 @@ class ValidationError(ValueError):
 
 
 def normalize_reading(payload: dict[str, Any], now: int | None = None) -> dict[str, Any]:
-    '''校验并归一化单条读数，非法字段直接拒绝'''
+    '''校验并归一化单条读数，非法字段直接拒绝。'''
     if not isinstance(payload, dict):
         raise ValidationError('上报内容必须是 JSON 对象')
     current = int(now if now is not None else time.time())
@@ -94,8 +108,6 @@ def normalize_reading(payload: dict[str, Any], now: int | None = None) -> dict[s
 
 
 class DeviceGateway:
-    '''设备上报的统一入口，HTTP 与模拟器共用。'''
-
     def __init__(
         self,
         storage: Storage,
@@ -106,13 +118,11 @@ class DeviceGateway:
         self.bus = bus
         self.settings_provider = settings_provider
 
-    # ------------------------------------------------------------------ 上报
-
     def settings(self) -> dict[str, Any]:
         return self.settings_provider()
 
     def submit(self, payload: dict[str, Any], source: str = 'device') -> dict[str, Any]:
-        '''处理单条上报或批量上报（``{"readings": [...]}``）。'''
+        '''处理单条或批量上报（{"readings": [...]}）。'''
         max_batch = int(self.settings().get('max_batch', 256))
         if isinstance(payload, dict) and isinstance(payload.get('readings'), list):
             items = payload['readings']
@@ -205,7 +215,7 @@ class DeviceGateway:
                     )
                     opened.append(alert)
                     self._publish_alert(alert)
-                    # 持续越限时只刷新告警数值，不重复写 WARN 日志，避免刷屏。
+                    # 持续越限只刷新数值，不重复写 WARN 日志。
                     if is_new:
                         self._log('WARN', 'alert', f"[{alert['severity'].upper()}] {device_name} {item['message']}")
                 else:
@@ -238,8 +248,6 @@ class DeviceGateway:
         self.bus.publish('reading', payload)
         return {'stored': result['stored'], 'opened': opened, 'resolved': resolved, 'reading': payload}
 
-    # ------------------------------------------------------------ 离线检测
-
     def check_offline(self, now: float | None = None) -> list[dict[str, Any]]:
         '''周期任务：为超时未上报的节点开告警。'''
         current = int(now if now is not None else time.time())
@@ -267,8 +275,6 @@ class DeviceGateway:
             self._log('WARN', 'node', f"节点 {node['device_id']} 离线 {self._format_age(age)}")
         return opened
 
-    # ------------------------------------------------------------ 面板数据
-
     def overview(self) -> dict[str, Any]:
         settings = self.settings()
         timeout = int(settings.get('offline_timeout', 90))
@@ -295,15 +301,18 @@ class DeviceGateway:
             'live_window_minutes': settings.get('live_window_minutes', 30),
         }
 
-    # ------------------------------------------------------------ 设置更新
-
     def update_settings(self, patch: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(patch, dict):
             raise ValidationError('设置必须是 JSON 对象')
         current = self.settings()
+        try:
+            public_url = normalize_public_url(patch.get('public_url', current.get('public_url', '')))
+        except ValueError as error:
+            raise ValidationError(str(error)) from error
         merged = {
             'offline_timeout': patch.get('offline_timeout', current.get('offline_timeout', 90)),
             'retention_days': patch.get('retention_days', current.get('retention_days', 30)),
+            'public_url': public_url,
             'alerts': _merge_rules(current.get('alerts') or {}, patch.get('alerts') or {}),
         }
         try:
@@ -315,8 +324,6 @@ class DeviceGateway:
         self._log('INFO', 'settings', '告警阈值与运行参数已更新')
         self.bus.publish('settings', merged)
         return merged
-
-    # ------------------------------------------------------------------ 工具
 
     def _publish_alert(self, alert: dict[str, Any]) -> None:
         self.bus.publish('alert', alert)
@@ -339,10 +346,10 @@ class DeviceGateway:
 
 
 def default_runtime_settings(config: dict[str, Any]) -> dict[str, Any]:
-    '''把配置文件里的默认值转成可在页面上编辑的运行期设置。'''
     return {
         'offline_timeout': int(config['device']['offline_timeout']),
         'retention_days': int(config['storage']['retention_days']),
+        'public_url': str(config['server'].get('public_url') or ''),
         'alerts': config['alerts'],
         'live_window_minutes': int(config['storage']['live_window_minutes']),
         'max_batch': int(config['device']['max_batch']),

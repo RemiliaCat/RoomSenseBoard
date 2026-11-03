@@ -1,6 +1,17 @@
-/* RoomSenseBoard 面板样式。
-   视觉规范沿用 OlivOS WebUI：同一套 CSS 变量、6px 圆角、浅色/深色双主题、
-   208px 侧栏 + 自适应主区，以及 800px / 480px 两档响应式断点。 */
+/*
+    ____                       _____
+   / __ \____  ____  ____ ___ / ___/___  ____  ________
+  / /_/ / __ \/ __ \/ __ `__ \\__ \/ _ \/ __ \/ ___/ _ \
+ / _, _/ /_/ / /_/ / / / / / /__/ /  __/ / / (__  )  __/
+/_/ |_|\____/\____/_/ /_/ /_/____/\___/_/ /_/____/\___/
+
+@File      :   web/style.css
+@Author    :   RmCat
+@Contact   :   RemiliaCatNero@gmail.com
+@License   :   AGPL
+@Copyright :   (C) 2026, RoomSense-Team
+@Desc      :   面板样式：CSS 变量、浅色/深色双主题与响应式布局。
+*/
 :root {
   color-scheme: light;
   --bg: #f5f6f8;
@@ -177,7 +188,6 @@ code {
   color: var(--muted);
   font-size: 13px;
 }
-/* ---------------------------------------------------------------- 品牌与登录 */
 .brand {
   display: flex;
   align-items: center;
@@ -234,7 +244,6 @@ code {
 #login-error {
   color: var(--danger);
 }
-/* ---------------------------------------------------------------- 整体骨架 */
 #shell {
   display: grid;
   grid-template-columns: 208px minmax(0, 1fr);
@@ -394,7 +403,6 @@ header h1 {
   background: var(--panel);
   color: var(--text);
 }
-/* ------------------------------------------------------------------ 统计卡片 */
 .cards {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -442,7 +450,6 @@ header h1 {
 .stats-cards .card strong {
   font-size: 22px;
 }
-/* -------------------------------------------------------------------- 面板 */
 .panel-head {
   display: flex;
   align-items: center;
@@ -475,7 +482,6 @@ header h1 {
 .runtime-summary .toolbar {
   margin-bottom: 0;
 }
-/* -------------------------------------------------------------------- 图表 */
 .chart-wrap {
   position: relative;
   width: 100%;
@@ -542,7 +548,6 @@ header h1 {
   color: var(--muted);
   font-size: 13px;
 }
-/* -------------------------------------------------------------------- 表格 */
 .table-wrap {
   padding: 0;
   overflow-x: auto;
@@ -622,7 +627,6 @@ td.empty {
 .num {
   white-space: nowrap;
 }
-/* -------------------------------------------------------------------- 告警 */
 .alert-list {
   list-style: none;
   margin: 0;
@@ -707,7 +711,6 @@ td.empty {
 .state.resolved {
   color: var(--ok);
 }
-/* -------------------------------------------------------------------- 键值表 */
 .kv-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
@@ -746,7 +749,6 @@ td.empty {
   font: 13px/1.6 Consolas, 'Microsoft YaHei', monospace;
   white-space: pre;
 }
-/* -------------------------------------------------------------------- 日志 */
 #log-count {
   color: var(--muted);
   font-size: 13px;
@@ -836,7 +838,6 @@ td.empty {
   background: #c12635;
   color: #fff;
 }
-/* -------------------------------------------------------------------- 表单 */
 details {
   border: 1px solid var(--line);
   padding: 12px;
@@ -873,8 +874,7 @@ dialog {
 dialog::backdrop {
   background: #0006;
 }
-/* 弹窗打开时焦点落在容器上（防止误触右上角关闭或危险按钮），
-   容器本身不在 Tab 序列内，因此不显示轮廓；Tab 后各控件的焦点环仍然保留。 */
+/* 弹窗容器不在 Tab 序列内，不显示焦点环。 */
 dialog:focus,
 dialog:focus-visible {
   outline: none;
@@ -897,7 +897,6 @@ dialog:focus-visible {
     transition: none;
   }
 }
-/* ------------------------------------------------------------------ 响应式 */
 @media (max-width: 1100px) {
   .cards {
     grid-template-columns: repeat(2, minmax(0, 1fr));

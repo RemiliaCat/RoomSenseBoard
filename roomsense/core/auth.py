@@ -1,7 +1,17 @@
-'''账号与会话：面板使用账号密码登录。
+# -*- encoding: utf-8 -*-
+r'''
+    ____                       _____
+   / __ \____  ____  ____ ___ / ___/___  ____  ________
+  / /_/ / __ \/ __ \/ __ `__ \\__ \/ _ \/ __ \/ ___/ _ \
+ / _, _/ /_/ / /_/ / / / / / /__/ /  __/ / / (__  )  __/
+/_/ |_|\____/\____/_/ /_/ /_/____/\___/_/ /_/____/\___/
 
-``conf/accounts.json`` 只保存 PBKDF2-HMAC-SHA256 派生结果，不保存明文；登录成功后签发
-内存会话令牌（服务重启即失效），页面请求通过 ``X-Auth-Token`` 携带；登录失败按来源限速。
+@File      :   roomsense/core/auth.py
+@Author    :   RmCat
+@Contact   :   RemiliaCatNero@gmail.com
+@License   :   AGPL
+@Copyright :   (C) 2026, RoomSense-Team
+@Desc      :   账号与会话：PBKDF2 口令摘要、内存会话与登录限速。
 '''
 
 from __future__ import annotations
@@ -31,7 +41,6 @@ def hash_password(
     iterations: int = PBKDF2_ITERATIONS,
     salt: bytes | None = None,
 ) -> dict[str, Any]:
-    '''生成可写入账号文件的派生结果。'''
     if not isinstance(password, str) or not password:
         raise ValueError('密码不能为空')
     salt_bytes = salt if salt is not None else secrets.token_bytes(16)
@@ -45,7 +54,6 @@ def hash_password(
 
 
 def verify_password(password: str, record: dict[str, Any]) -> bool:
-    '''按账号文件中的参数重算摘要并做常数时间比较。'''
     if not isinstance(password, str) or not isinstance(record, dict):
         return False
     if record.get('algorithm') != 'pbkdf2_sha256':
@@ -61,16 +69,12 @@ def verify_password(password: str, record: dict[str, Any]) -> bool:
 
 
 class AccountStore:
-    '''读写 ``conf/accounts.json``。'''
-
     VERSION = 1
 
     def __init__(self, path: str | os.PathLike[str]) -> None:
         self.path = Path(path)
         self._lock = threading.RLock()
         self._dummy_record: dict[str, Any] | None = None
-
-    # ------------------------------------------------------------------ 文件
 
     def _empty(self) -> dict[str, Any]:
         return {'version': self.VERSION, 'users': []}
@@ -97,10 +101,8 @@ class AccountStore:
             try:
                 self.path.chmod(0o600)
             except OSError:
-                # Windows 等平台可能不支持该权限位。
+                # Windows 可能不支持该权限位。
                 pass
-
-    # ------------------------------------------------------------------ 用户
 
     def find(self, username: str) -> dict[str, Any] | None:
         if not isinstance(username, str):
@@ -115,7 +117,6 @@ class AccountStore:
         return [str(user.get('username')) for user in self.load().get('users', [])]
 
     def describe(self, username: str) -> dict[str, Any] | None:
-        '''返回不含口令摘要的用户信息。'''
         user = self.find(username)
         if user is None:
             return None
@@ -165,7 +166,7 @@ class AccountStore:
         return verify_password(password, user.get('password') or {})
 
     def ensure_user(self, username: str = 'admin', password: str | None = None) -> tuple[str, str | None]:
-        '''确保账号存在；返回 ``(用户名, 本次生成的初始密码或 None)``。'''
+        '''确保账号存在，返回 (用户名, 本次生成的初始密码或 None)。'''
         username = _clean_username(username)
         existing = self.find(username)
         if existing is not None:
@@ -179,8 +180,6 @@ class AccountStore:
 
 
 class SessionStore:
-    '''浏览器登录会话：短期令牌保存在内存，服务重启后需要重新登录。'''
-
     def __init__(self, ttl: float = 12 * 3600, max_sessions: int = 32) -> None:
         self.ttl = float(ttl)
         self.max_sessions = max_sessions
@@ -241,8 +240,6 @@ class SessionStore:
 
 
 class LoginThrottle:
-    '''按来源地址限制登录失败次数。'''
-
     def __init__(self, limit: int = 10, window: float = 300.0) -> None:
         self.limit = limit
         self.window = window

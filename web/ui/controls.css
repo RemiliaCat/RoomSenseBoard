@@ -1,20 +1,25 @@
-/* 自绘控件层样式（web/ui/）。
+/*
+    ____                       _____
+   / __ \____  ____  ____ ___ / ___/___  ____  ________
+  / /_/ / __ \/ __ \/ __ `__ \\__ \/ _ \/ __ \/ ___/ _ \
+ / _, _/ /_/ / /_/ / / / / / /__/ /  __/ / / (__  )  __/
+/_/ |_|\____/\____/_/ /_/ /_/____/\___/_/ /_/____/\___/
 
-   这里只放“原生控件的外观或弹出层由浏览器/系统绘制、无法用 CSS 统一到面板主题”的实现：
-   - 下拉选择器（配合 ui/dropdown.js，JS 生效后才隐藏原生 select）；
-   - 复选框（纯 CSS，保留原生 input 的语义、键盘与表单行为）；
-   - 折叠面板标记（纯 CSS，隐藏默认三角后自绘雪佛龙）。
+@File      :   web/ui/controls.css
+@Author    :   RmCat
+@Contact   :   RemiliaCatNero@gmail.com
+@License   :   AGPL
+@Copyright :   (C) 2026, RoomSense-Team
+@Desc      :   自绘控件样式：下拉、复选框、折叠标记与指标筛选。
+*/
 
-   主题变量与页面布局仍在 web/style.css 中，本文件在其后加载，可安全覆盖同名规则。 */
-
-/* --------------------------------------------------------------- 下拉选择器 */
 .select {
   position: relative;
   display: inline-flex;
   min-width: 0;
   max-width: 100%;
 }
-/* 仅在 JS 接管后才会被加上该类，未执行脚本时仍使用原生下拉。 */
+/* 仅在 JS 接管后才加上该类，未执行脚本时仍是原生下拉。 */
 .select-native {
   display: none;
 }
@@ -113,7 +118,6 @@ label.inline .select {
   min-width: 150px;
 }
 
-/* ------------------------------------------------------------------ 复选框 */
 input[type='checkbox'] {
   appearance: none;
   -webkit-appearance: none;
@@ -167,7 +171,6 @@ input[type='checkbox']:focus-visible {
   outline-offset: 2px;
 }
 
-/* -------------------------------------------------------------- 折叠面板标记 */
 summary {
   display: flex;
   align-items: center;
@@ -202,7 +205,6 @@ details[open] > summary::before {
   }
 }
 
-/* ------------------------------------------------------------ 指标筛选气泡 */
 .metric-chips {
   display: flex;
   flex-wrap: wrap;

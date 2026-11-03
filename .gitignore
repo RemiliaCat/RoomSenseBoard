@@ -6,11 +6,16 @@ __pycache__/
 
 # 运行期数据与凭据
 conf/accounts.json
+conf/webui_token.txt
 data/
 *.db
 *.db-wal
 *.db-shm
 logfile/
+
+# 打包产物
+build/
+dist/
 
 # 编辑器
 .vscode/

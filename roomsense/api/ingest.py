@@ -1,7 +1,17 @@
-'''设备平面：节点上报入口。
+# -*- encoding: utf-8 -*-
+r'''
+    ____                       _____
+   / __ \____  ____  ____ ___ / ___/___  ____  ________
+  / /_/ / __ \/ __ \/ __ `__ \\__ \/ _ \/ __ \/ ___/ _ \
+ / _, _/ /_/ / /_/ / / / / / /__/ /  __/ / / (__  )  __/
+/_/ |_|\____/\____/_/ /_/ /_/____/\___/_/ /_/____/\___/
 
-只用设备密钥鉴权（``X-Device-Key`` 或 ``Authorization: Bearer``），与面板账号体系隔离；
-校验通过后交给 ``DeviceGateway`` 入库、判定告警并广播实时事件。
+@File      :   roomsense/api/ingest.py
+@Author    :   RmCat
+@Contact   :   RemiliaCatNero@gmail.com
+@License   :   AGPL
+@Copyright :   (C) 2026, RoomSense-Team
+@Desc      :   设备平面：按设备密钥鉴权接收节点上报。
 '''
 
 from __future__ import annotations
@@ -16,8 +26,6 @@ INGEST_PATH = '/api/ingest'
 
 
 class DeviceIngestApi:
-    '''设备平面路由。'''
-
     def __init__(self, gateway: DeviceGateway, device_key: str) -> None:
         self.gateway = gateway
         self.device_key = device_key
@@ -33,7 +41,7 @@ class DeviceIngestApi:
         headers: Mapping[str, str],
         read_json: Callable[[], dict[str, Any]],
     ) -> dict[str, Any] | None:
-        '''命中设备路由时返回响应体，否则返回 ``None`` 交回管理平面。'''
+        '''命中设备路由时返回响应体，否则返回 None 交回管理平面。'''
         if path != INGEST_PATH:
             return None
         if method != 'POST':

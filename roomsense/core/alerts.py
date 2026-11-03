@@ -1,11 +1,17 @@
-'''阈值判定。
+# -*- encoding: utf-8 -*-
+r'''
+    ____                       _____
+   / __ \____  ____  ____ ___ / ___/___  ____  ________
+  / /_/ / __ \/ __ \/ __ `__ \\__ \/ _ \/ __ \/ ___/ _ \
+ / _, _/ /_/ / /_/ / / / / / /__/ /  __/ / / (__  )  __/
+/_/ |_|\____/\____/_/ /_/ /_/____/\___/_/ /_/____/\___/
 
-判定使用回差（hysteresis）避免数值在阈值附近抖动时反复开关告警：
-
-- 高限规则：从未触发状态越过上限即触发；已触发时必须回落到 ``上限 - 回差`` 才解除；
-- 低限规则：对称处理，已触发时必须回升到 ``下限 + 回差`` 才解除。
-
-严重级别只看当前值：越过 ``critical_*`` 即为 critical，否则为 warning。
+@File      :   roomsense/core/alerts.py
+@Author    :   RmCat
+@Contact   :   RemiliaCatNero@gmail.com
+@License   :   AGPL
+@Copyright :   (C) 2026, RoomSense-Team
+@Desc      :   阈值判定：带回差的上下限规则，输出需要新开或解除的告警。
 '''
 
 from __future__ import annotations
@@ -22,16 +28,7 @@ def evaluate_reading(
     settings: dict[str, Any],
     active_kinds: set[str],
 ) -> list[dict[str, Any]]:
-    '''根据一条读数给出需要新开或解除的告警。
-
-    返回列表元素形如::
-
-        {'action': 'open'|'resolve', 'kind': ..., 'severity': ..., 'value': ...,
-         'threshold': ..., 'message': ...}
-
-    ``active_kinds`` 是该设备当前活跃的告警类型。已经活跃且仍然越限的规则会再次返回
-    ``open``，调用方据此刷新告警的当前值与严重级别（不会新建重复记录）。
-    '''
+    '''按一条读数给出需要新开或解除的告警。'''
     results: list[dict[str, Any]] = []
     rules = settings.get('alerts') or {}
 

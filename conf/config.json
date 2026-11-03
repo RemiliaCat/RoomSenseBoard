@@ -2,6 +2,7 @@
     "server": {
         "host": "127.0.0.1",
         "port": 20500,
+        "public_url": "",
         "accounts_path": "./conf/accounts.json",
         "session_hours": 12,
         "cors_origins": [],
@@ -42,7 +43,7 @@
         }
     },
     "simulator": {
-        "enable": true,
+        "enable": false,
         "interval": 5.0,
         "seed": 20260926,
         "devices": [

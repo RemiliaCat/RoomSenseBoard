@@ -1,7 +1,17 @@
-'''无硬件阶段的数据模拟器。
+# -*- encoding: utf-8 -*-
+r'''
+    ____                       _____
+   / __ \____  ____  ____ ___ / ___/___  ____  ________
+  / /_/ / __ \/ __ \/ __ `__ \\__ \/ _ \/ __ \/ ___/ _ \
+ / _, _/ /_/ / /_/ / / / / / /__/ /  __/ / / (__  )  __/
+/_/ |_|\____/\____/_/ /_/ /_/____/\___/_/ /_/____/\___/
 
-模拟读数走与真实设备相同的 ``DeviceGateway.submit()`` 链路，因此前端、告警与日志的
-行为一致。每个房间按“场景基线 + 日变化 + 随机游走 + 事件”生成各项指标。
+@File      :   roomsense/core/simulator.py
+@Author    :   RmCat
+@Contact   :   RemiliaCatNero@gmail.com
+@License   :   AGPL
+@Copyright :   (C) 2026, RoomSense-Team
+@Desc      :   数据模拟器：按房间场景生成读数，走与真实设备相同的上报链路。
 '''
 
 from __future__ import annotations
@@ -14,7 +24,6 @@ from typing import Any
 
 from .gateway import DeviceGateway
 
-# 场景基线：不同房间类型的典型水平
 PROFILES: dict[str, dict[str, float]] = {
     'classroom': {'temperature': 23.4, 'humidity': 52.0, 'co2': 560.0, 'pm25': 18.0, 'noise': 52.0, 'light': 320.0},
     'office': {'temperature': 24.2, 'humidity': 48.0, 'co2': 620.0, 'pm25': 15.0, 'noise': 45.0, 'light': 340.0},
@@ -24,7 +33,6 @@ PROFILES: dict[str, dict[str, float]] = {
 }
 
 EPISODES: dict[str, dict[str, Any]] = {
-    # 人多拥挤：CO₂ 直接拉到该区间（与房间基线无关），噪声上升，温度、湿度略升
     'crowd': {
         'co2_range': (1350.0, 1850.0),
         'temperature': 1.6,
@@ -32,20 +40,14 @@ EPISODES: dict[str, dict[str, Any]] = {
         'noise': 14.0,
         'duration': (100, 200),
     },
-    # 开窗通风：温度骤降、湿度下降、PM2.5 降低但噪声上升
     'window': {'temperature': -6.5, 'humidity': -12.0, 'pm25': -8.0, 'noise': 6.0, 'duration': (110, 210)},
-    # 设备散热：温度快速升高，CO₂ 在基线上小幅抬升
     'equipment': {'temperature': 7.5, 'co2_offset': 150.0, 'noise': 7.0, 'duration': (70, 150)},
-    # 干燥天气：湿度走低
     'dry': {'humidity': -24.0, 'duration': (120, 220)},
-    # 扬尘/雾霾：PM2.5 升高
     'dust': {'pm25': 45.0, 'humidity': -6.0, 'noise': 4.0, 'duration': (120, 240)},
 }
 
 
 class Simulator(threading.Thread):
-    '''后台线程，周期性把模拟读数交给网关。'''
-
     def __init__(
         self,
         gateway: DeviceGateway,
@@ -70,8 +72,6 @@ class Simulator(threading.Thread):
     def device_count(self) -> int:
         return len(self._states)
 
-    # ------------------------------------------------------------------ 生命周期
-
     def stop(self) -> None:
         self._stop_event.set()
 
@@ -81,19 +81,13 @@ class Simulator(threading.Thread):
             started = time.time()
             try:
                 self.tick(now=started)
-            except Exception as error:  # 模拟器不能因为单次异常退出
+            except Exception as error:  # 单个节点异常不应让模拟器退出
                 self.gateway.storage.add_log('ERROR', 'simulator', f'模拟器 tick 失败：{error}')
             elapsed = time.time() - started
             self._stop_event.wait(max(0.2, self.interval - elapsed))
 
-    # ------------------------------------------------------------------ 单步
-
     def tick(self, now: float | None = None) -> list[dict[str, Any]]:
-        '''推进一次模拟，返回本步提交的读数。
-
-        单个节点出错只记录该节点的错误并跳过：一次异常不能影响其余节点上报，否则排在
-        后面的节点会被离线检测误判为掉线。
-        '''
+        '''推进一次模拟，返回本步提交的读数。'''
         current = now if now is not None else time.time()
         submitted: list[dict[str, Any]] = []
         for state in self._states:
@@ -107,7 +101,7 @@ class Simulator(threading.Thread):
         return submitted
 
     def _step(self, state: dict[str, Any], current: float) -> dict[str, Any] | None:
-        '''推进单个节点；处于离线演示窗口时返回 ``None``。'''
+        '''推进单个节点；处于离线演示窗口时返回 None。'''
         if state['offline_until'] > current:
             return None
         if self.offline_demo and state['offline_plan'] and state['next_offline'] <= current:
@@ -131,8 +125,6 @@ class Simulator(threading.Thread):
             )
         except Exception:  # pragma: no cover - 日志写入失败不再向上抛
             pass
-
-    # ------------------------------------------------------------------ 内部
 
     def _init_state(self, device: dict[str, Any], index: int) -> dict[str, Any]:
         default_profile = 'lab' if 'lab' in str(device['device_id']).lower() else 'classroom'

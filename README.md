@@ -16,10 +16,13 @@
 ### 源码部署
 
 ```powershell
-python main.py                 # 默认 http://127.0.0.1:20500，带 5 个模拟节点
-python main.py --no-simulator  # 只接收真实设备上报
-python main.py --open          # 启动后自动打开浏览器
+python main.py              # 默认 http://127.0.0.1:20500，只接收真实设备上报
+python main.py --simulator  # 额外启动 5 个内置模拟节点，用于演示与联调
+python main.py --open       # 启动后自动打开浏览器
 ```
+
+生产环境默认**不带模拟器**（加 `--simulator` 或环境变量 `ROOMSENSE_SIMULATE=1` 才会打开），
+打包后的 exe 同样如此。
 
 首次启动会生成管理账号并**在终端打印一次初始密码**：
 
@@ -29,6 +32,7 @@ RoomSenseBoard 已启动
   管理账号：admin（账号文件 conf/accounts.json）
   初始密码：xxxxxxxxxxxxxx
   数据上传：http://127.0.0.1:20500/api/ingest（节点密钥 data/device_key.txt）
+  数据模拟：关闭
 ```
 
 登录面板后在“设置 → 账号安全”修改密码；忘记密码时执行
@@ -36,6 +40,67 @@ RoomSenseBoard 已启动
 
 节点侧使用 `data/device_key.txt` 中的密钥上报（协议见 [doc/protocol.md](doc/protocol.md)）。
 无需安装任何第三方依赖，Python 3.10+ 即可运行（开发环境为 3.11）。
+
+### 打包发布
+
+用 [PyInstaller](https://pyinstaller.org/) 把解释器、标准库与 `web/` 一起装进**一个 exe**。
+PyInstaller 只做收集与打包、不编译 C 代码，本项目又是纯标准库应用，一次构建通常十几秒。
+
+```powershell
+uv sync                               # 安装开发依赖（PyInstaller，运行期仍然零依赖）
+.\package\build.ps1                 # 单文件 exe → dist\RoomSenseBoard\RoomSenseBoard.exe
+.\package\build.ps1 -Zip            # 额外生成 dist\RoomSenseBoard-0.1.0-onefile-win64.zip
+.\package\build.ps1 -Mode onedir    # 目录模式，适合本机反复替换 web/ 调试
+.\package\build.ps1 -SkipTests      # 跳过打包前的单元测试
+.\package\build.ps1 -DistPath build\release  # dist 被正在运行的实例占用时，换一个输出目录
+```
+
+也可以直接双击 `package\build.cmd`，等同默认参数。
+
+分发包里只有 `RoomSenseBoard.exe` 与 `LICENSE`；**双击 exe 就能运行**，首次启动会在 exe 旁边
+自动释放全部资源，并自动打开浏览器：
+
+```text
+RoomSenseBoard\                    ← 首次运行后长这样
+├── RoomSenseBoard.exe             分发包里只有它（和 LICENSE）
+├── conf\config.json               默认配置（不含模拟节点），之后由你维护
+├── data\                          roomsense.db、节点密钥与资源释放记录
+├── web\                           面板页面，可以自行替换
+├── doc\protocol.md
+├── README.md
+└── LICENSE
+```
+
+之后**升级就是替换这一个 exe**：程序会比对 `data\assets.json` 里记录的版本与文件哈希，
+只刷新"上次由程序写入、之后没被改过"的文件；`conf\`、`data\` 以及你改过的页面原样保留。
+
+脚本按顺序做这些事：检查 Python 与 PyInstaller（缺失时自动 `uv sync` 或 `pip install`）→ 把
+`package/version_info.txt` 的版本号同步成 `roomsense/__init__.py` 里的 `__version__` →
+跑单元测试 → 清理 `build\` 与 `dist\` → 调用 PyInstaller → 发布目录只留 exe 与 LICENSE →
+冒烟测试（先 `--help`，再在临时目录里真跑一遍：确认资源已释放、默认配置未启用模拟器、面板可
+访问）。需要时用 `-SkipTests`、`-SkipSmokeTest` 单独跳过对应环节。
+
+| 模式 | 产物 | 适合 |
+| --- | --- | --- |
+| `onefile`（默认） | `dist\RoomSenseBoard\RoomSenseBoard.exe`，约 9 MB | 分发，替换 exe 升级 |
+| `onedir` | `dist\RoomSenseBoard\`（exe 加 `_internal\`） | 本机调试、频繁改 `web\` |
+
+运行期路径规则见 `roomsense/config.py`：**可写**的 `conf/`、`data/` 按 exe 所在目录解析（不是
+当前工作目录），整个目录拷到任何位置都能直接跑；**只读**的 `web/` 由 `roomsense/assets.py` 从
+exe 里释放到同目录，之后以磁盘上的那份为准。
+
+#### 对外访问地址
+
+监听 `0.0.0.0` 时，`0.0.0.0` 本身既不能写进节点固件也贴不给人，面板与启动横幅按下面的顺序
+给出"上报地址"：
+
+1. `server.public_url`（`conf/config.json`）或面板"设置 → 对外访问地址"（存数据库、立即生效）；
+   部署在域名或反向代理后面时填它，例如 `https://panel.example.com`；
+2. 监听的是具体地址（如 `192.168.1.20`）时，直接用监听地址；
+3. 否则探测本机局域网 IPv4：默认路由所在网卡排第一，其余网卡作为候选一并列出；
+4. 都没有时回退 `127.0.0.1`。
+
+启动横幅、"设置 → 设备接入"里的上报地址与"关于"里的对外地址用的是同一份结果。
 
 ## 界面
 
@@ -96,6 +161,8 @@ RoomSenseBoard/
 │   │   ├── bus.py         # 事件总线（有界队列，慢客户端不拖垮采集）
 │   │   └── simulator.py   # 无硬件阶段的数据模拟器
 │   ├── config.py          # 默认配置、深合并、节点密钥文件
+│   ├── assets.py          # 打包运行期：把 web/、conf/ 等资源释放到 exe 旁边
+│   ├── netinfo.py         # 对外访问地址：public_url / 本机网卡 / 回环
 │   └── app.py             # 组件装配、周期任务
 ├── web/                   # 监控面板前端
 │   ├── ui/                # 自绘控件层：dropdown.js（JS）+ controls.css（自绘控件样式）
@@ -105,10 +172,14 @@ RoomSenseBoard/
 │   ├── chart.js           # Canvas 折线图
 │   ├── theme.js           # 主题切换
 │   ├── config.js          # 前后端分离时的接口地址
-│   └── logo.svg           # 标识占位符
+│   ├── icon.png           # 应用图标主图（1024 px）
+│   ├── icon.ico           # 多尺寸应用图标（16–256 px）
+│   ├── favicon.ico        # 浏览器页签图标（16–64 px）
+│   └── logo.png           # 面板品牌位使用的 128 px 图标
 ├── conf/config.json       # 端口、CORS 白名单、阈值、模拟节点等配置
 ├── doc/protocol.md        # 设备上报协议与面板 API
-└── tests/test_core.py     # 41 个 unittest 用例
+├── package/             # 打包发布：spec、版本资源与 build.ps1 / build.cmd（产物在 build/、dist/）
+└── tests/test_core.py     # 57 个 unittest 用例
 ```
 
 ## 前后端分离部署
@@ -140,6 +211,7 @@ window.ROOMSENSE_CONFIG = { apiBase: 'http://192.168.1.20:20500' };
     "server": {
         "host": "0.0.0.0",
         "port": 20500,
+        "public_url": "https://panel.example.com",
         "session_hours": 12,
         "cors_origins": ["http://192.168.1.20:5173"]
     },
@@ -152,7 +224,10 @@ window.ROOMSENSE_CONFIG = { apiBase: 'http://192.168.1.20:20500' };
 ，以及仅用于首次创建账号的 `ROOMSENSE_ADMIN_USER`、`ROOMSENSE_ADMIN_PASSWORD`。
 监听非本机地址前请确认账号密码强度，并且不要直接暴露到公网。
 
-阈值、离线判定与保留天数也可以在面板“设置”页修改，保存后立即生效并写入数据库。
+`public_url` 留空时按监听地址与本机网卡推断；面板“设置 → 对外访问地址”里的值存在数据库里，
+会覆盖配置文件中的默认值（改配置文件后想重新生效，把设置页清空保存即可）。
+
+阈值、离线判定、保留天数与对外访问地址也可以在面板“设置”页修改，保存后立即生效并写入数据库。
 
 ## 测试
 
@@ -163,16 +238,8 @@ python -m unittest discover -s tests -v
 覆盖内容：账号口令派生与校验、初始密码生成、改密与登录限速依赖、CORS 白名单、
 SSE 实时流连通与事件推送、告警触发/回差/严重级别、同秒重复上报合并、历史补传不覆盖
 实时状态、时间桶聚合（含 PM2.5/噪声/光照）、批量上报、离线告警与恢复、设置校验、
-设备密钥鉴权与上报链路。
-
-## 当前状态与后续计划
-
-- [x] 数据收发后端：上报校验、入库、阈值告警、离线检测、模拟器
-- [x] 管理系统后端：账号密码登录、会话、节点/告警/历史/日志/设置接口
-- [x] 监控面板前端：仪表盘、节点、告警、历史、日志、设置六个页面
-- [ ] RA4M2 固件（FSP + WiFi 模块 AT 指令）按 `doc/protocol.md` 对接
-- [ ] 可选 MQTT 接入（网关侧订阅后转发到同一 `DeviceGateway`）
-- [ ] 多用户与角色权限、异常事件邮件/企业微信通知
+设备密钥鉴权与上报链路、对外地址解析（配置优先/网卡探测/回环回退）、打包资源的首次释放与
+换版本时的"刷新未改文件、保留已改文件"。
 
 ## 已知限制
 - 单进程部署（单栋楼宇规模足够）

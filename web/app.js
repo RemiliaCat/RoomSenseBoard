@@ -1,10 +1,20 @@
+/*
+    ____                       _____
+   / __ \____  ____  ____ ___ / ___/___  ____  ________
+  / /_/ / __ \/ __ \/ __ `__ \\__ \/ _ \/ __ \/ ___/ _ \
+ / _, _/ /_/ / /_/ / / / / / /__/ /  __/ / / (__  )  __/
+/_/ |_|\____/\____/_/ /_/ /_/____/\___/_/ /_/____/\___/
+
+@File      :   web/app.js
+@Author    :   RmCat
+@Contact   :   RemiliaCatNero@gmail.com
+@License   :   AGPL
+@Copyright :   (C) 2026, RoomSense-Team
+@Desc      :   面板前端逻辑：登录、导航、概览、实时图表与各功能页。
+*/
 'use strict';
 
 (() => {
-
-  /* RoomSenseBoard 面板逻辑。
-
-     数据来自 /api/*，实时事件来自 /api/stream。 */
 
   const $ = (id) => document.getElementById(id);
   const sessionStorageKey = 'roomsense.panel.session';
@@ -73,8 +83,6 @@
     charts: {},
   };
 
-  /* ------------------------------------------------------------------ 基础工具 */
-
   function element(tag, text, attrs = {}) {
     const node = document.createElement(tag);
     if (text !== null && text !== undefined) node.textContent = text;
@@ -102,7 +110,6 @@
       if (value) localStorage.setItem(sessionStorageKey, value);
       else localStorage.removeItem(sessionStorageKey);
     } catch {
-      // 浏览器禁用本地存储时仍允许手动登录。
     }
     return '';
   }
@@ -153,8 +160,6 @@
     return `${minutes} 分 ${value % 60} 秒`;
   }
 
-  /* ------------------------------------------------------------------ 提示条 */
-
   function hideNotice() {
     clearTimeout(state.noticeTimer);
     state.noticeTimer = null;
@@ -175,7 +180,7 @@
   }
 
   async function copyText(text, label = '内容') {
-    // 非安全上下文（如局域网 HTTP）下 Clipboard API 不可用，回退到 execCommand。
+    // 非安全上下文（局域网 HTTP）下 Clipboard API 不可用，回退到 execCommand。
     try {
       await navigator.clipboard.writeText(text);
       notify(`${label}已复制到剪贴板`);
@@ -189,8 +194,6 @@
       notify(`${label}已复制到剪贴板`);
     }
   }
-
-  /* ------------------------------------------------------------------ API */
 
   async function api(path, options = {}) {
     const { anonymous = false, ...requestOptions } = options;
@@ -219,8 +222,6 @@
     syncClock(data.server_time);
     return data;
   }
-
-  /* ------------------------------------------------------------------ 登录 */
 
   async function login(event) {
     event?.preventDefault();
@@ -295,7 +296,6 @@
     $('loading').hidden = true;
     $('login').hidden = true;
     $('shell').hidden = false;
-    // 先取一次总览，保证侧栏统计与节点下拉在任何页面都可用。
     await Promise.all([
       loadSettings().catch(() => {}),
       loadOverview().catch(() => {}),
@@ -323,13 +323,10 @@
     }
   }
 
-  /* ------------------------------------------------------------------ 导航 */
-
   function rememberPage() {
     try {
       sessionStorage.setItem(pageStorageKey, state.page);
     } catch {
-      // 忽略存储不可用。
     }
   }
 
@@ -338,7 +335,6 @@
       const saved = sessionStorage.getItem(pageStorageKey);
       if (saved && titles[saved]) return saved;
     } catch {
-      // 忽略存储不可用。
     }
     return 'dashboard';
   }
@@ -369,8 +365,6 @@
     }, 30000);
   }
 
-  /* --------------------------------------------------------------- 实时流 */
-
   function startStream() {
     stopStream();
     setConnection('正在连接实时数据…', '');
@@ -393,7 +387,7 @@
     source.onerror = () => {
       state.streamErrors += 1;
       setConnection('实时连接中断，正在重试…', 'down');
-      // 连续失败时校验会话：服务重启或会话过期要回登录页，而不是无限重连。
+      // 连续失败时校验会话：会话过期要回登录页，而不是无限重连。
       if (state.streamErrors >= 2) verifySessionAfterStreamError();
     };
   }
@@ -407,7 +401,7 @@
       const alive = await api('/api/session', { method: 'POST' });
       if (alive) state.streamErrors = 0;
     } catch {
-      // 401 已由 api() 统一处理为退出登录；其他错误保持“重试中”状态。
+      // 401 已由 api() 统一处理为退出登录。
     } finally {
       sessionCheckPending = false;
     }
@@ -552,8 +546,6 @@
       renderRecentAlerts();
     }, 800);
   }
-
-  /* ------------------------------------------------------------------ 概览 */
 
   async function loadOverview() {
     const data = await api('/api/overview');
@@ -745,8 +737,6 @@
       : '当前仅接收真实设备上报。';
   }
 
-  /* --------------------------------------------------------------- 实时图表 */
-
   function renderNodeOptions() {
     const select = $('live-node');
     const previous = state.liveNode || select.value;
@@ -827,7 +817,7 @@
       state.charts.live = new LineChart($('live-chart'), { emptyText: '等待节点上报数据…' });
     }
     const points = state.liveSeries.get(state.liveNode) || [];
-    // 第一个指标走左轴、第二个走右轴，因此任意两个不同量纲的指标都能同图对比。
+    // 两个指标分走左右轴，不同量纲也能同图对比。
     const series = state.liveMetrics.map((key, index) => ({
       key,
       label: METRICS[key].label,
@@ -851,8 +841,6 @@
     const lastPoint = points[points.length - 1];
     $('live-updated').textContent = lastPoint ? `最新数据 ${formatTime(lastPoint.ts, true)}` : '暂无数据';
   }
-
-  /* ------------------------------------------------------------------ 节点页 */
 
   async function loadNodes() {
     const data = await api('/api/nodes');
@@ -1067,8 +1055,6 @@
     }
   }
 
-  /* ------------------------------------------------------------------ 告警页 */
-
   async function loadAlerts() {
     const filter = $('alert-filter').value || 'active';
     const data = await api(`/api/alerts?state=${encodeURIComponent(filter)}&limit=300`);
@@ -1137,8 +1123,6 @@
     await Promise.all([loadAlerts().catch(() => {}), loadOverview().catch(() => {})]);
     notify(result.count ? `已确认 ${result.count} 条告警` : '没有未处理的告警');
   }
-
-  /* ------------------------------------------------------------------ 历史页 */
 
   async function loadHistory() {
     const range = $('history-range').value || '24h';
@@ -1272,8 +1256,6 @@
     URL.revokeObjectURL(link.href);
   }
 
-  /* ------------------------------------------------------------------ 日志页 */
-
   function selectedLogLevels() {
     const all = $('log-all').checked;
     if (all) return [...LOG_LEVELS];
@@ -1331,7 +1313,16 @@
     if ($('log-scroll').checked) output.scrollTop = output.scrollHeight;
   }
 
-  /* ------------------------------------------------------------------ 设置页 */
+  const ADDRESS_SOURCE_TEXT = {
+    configured: '来自配置或设置页',
+    listen: '来自监听地址',
+    lan: '按本机网卡推断',
+    loopback: '本机回环地址',
+  };
+
+  function addressSourceText(source) {
+    return ADDRESS_SOURCE_TEXT[source] || '自动推断';
+  }
 
   async function loadSettings() {
     const data = await api('/api/settings');
@@ -1353,11 +1344,14 @@
     $('set-co2-critical-high').value = co2.critical_high ?? '';
     $('set-offline').value = data.settings.offline_timeout ?? 90;
     $('set-retention').value = data.settings.retention_days ?? 30;
+    $('set-public-url').value = data.settings.public_url || '';
     const device = data.device || {};
+    const serverInfo = data.server || {};
     const info = $('device-info');
     info.replaceChildren();
     const rows = [
       ['上报地址', device.ingest_url || '--'],
+      ['地址来源', addressSourceText(serverInfo.public_url_source)],
       ['节点密钥', device.key || '--'],
       ['离线判定', `${device.offline_timeout ?? '--'} 秒`],
       ['单批上限', `${device.max_batch ?? '--'} 条`],
@@ -1367,6 +1361,8 @@
       row.append(element('span', label), element('strong', String(value)));
       info.append(row);
     }
+    const extras = (device.ingest_urls || []).slice(1);
+    $('ingest-addresses').textContent = extras.length ? `其它可用地址：${extras.join('、')}` : '';
     $('ingest-example').textContent = [
       'POST /api/ingest',
       'Content-Type: application/json',
@@ -1399,6 +1395,7 @@
       ['版本', server.version ? `v${server.version}` : '--'],
       ['运行时长', formatUptime(server.uptime)],
       ['监听地址', `${server.host || '--'}:${server.port || '--'}`],
+      ['对外地址', server.public_url || '--'],
       ['数据模拟器', server.simulator ? '已开启' : '已关闭'],
     ];
     for (const [label, value] of aboutRows) {
@@ -1519,14 +1516,29 @@
     }
   }
 
+  async function savePublicUrl(event) {
+    event.preventDefault();
+    const note = $('public-url-note');
+    note.textContent = '正在保存…';
+    try {
+      await api('/api/settings', {
+        method: 'PUT',
+        body: { public_url: $('set-public-url').value.trim() },
+      });
+      note.textContent = '已保存并立即生效';
+      notify('对外访问地址已更新');
+      await loadSettings();
+    } catch (error) {
+      note.textContent = error.message;
+    }
+  }
+
   async function regenerateDeviceKey() {
     if (!window.confirm('重新生成后，旧密钥会立即失效，需要同步更新所有节点固件。确定继续？')) return;
     const data = await api('/api/device-key/regenerate', { method: 'POST' });
     notify(`新的节点密钥：${data.device_key}`, 20000);
     loadSettings().catch(notifyError);
   }
-
-  /* ------------------------------------------------------------------ 事件绑定 */
 
   function bindEvents() {
     renderMetricChips();
@@ -1589,6 +1601,7 @@
     });
     $('settings-form').addEventListener('submit', (event) => saveSettings(event).catch(notifyError));
     $('settings-reload').addEventListener('click', () => loadSettings().catch(notifyError));
+    $('public-url-form').addEventListener('submit', (event) => savePublicUrl(event).catch(notifyError));
     $('copy-ingest').addEventListener('click', () => copyText(state.device?.ingest_url || '', '上报地址'));
     $('copy-device-key').addEventListener('click', () => copyText(state.device?.key || '', '节点密钥'));
     $('regen-device-key').addEventListener('click', () => regenerateDeviceKey().catch(notifyError));

@@ -1,13 +1,17 @@
-'''运行期配置。
+# -*- encoding: utf-8 -*-
+r'''
+    ____                       _____
+   / __ \____  ____  ____ ___ / ___/___  ____  ________
+  / /_/ / __ \/ __ \/ __ `__ \\__ \/ _ \/ __ \/ ___/ _ \
+ / _, _/ /_/ / /_/ / / / / / /__/ /  __/ / / (__  )  __/
+/_/ |_|\____/\____/_/ /_/ /_/____/\___/_/ /_/____/\___/
 
-配置优先级（后者覆盖前者）：
-
-1. ``DEFAULT_CONFIG``：本文件内置默认值，缺省即可运行；
-2. ``conf/config.json``：只写需要覆盖的字段，深合并到默认值；
-3. 环境变量 ``ROOMSENSE_HOST`` / ``ROOMSENSE_PORT`` / ``ROOMSENSE_SIMULATE`` /
-   ``ROOMSENSE_ADMIN_USER`` / ``ROOMSENSE_ADMIN_PASSWORD``（后两个只在首次创建账号时生效）。
-
-相对路径一律相对项目根目录解析，因此从任何工作目录启动行为一致。
+@File      :   roomsense/config.py
+@Author    :   RmCat
+@Contact   :   RemiliaCatNero@gmail.com
+@License   :   AGPL
+@Copyright :   (C) 2026, RoomSense-Team
+@Desc      :   运行期配置：默认值、config.json 合并、环境变量覆盖与路径解析。
 '''
 
 from __future__ import annotations
@@ -15,15 +19,27 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import sys
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parent.parent
+
+def is_frozen() -> bool:
+    return bool(getattr(sys, 'frozen', False))
+
+
+BASE_DIR = (
+    Path(sys.executable).resolve().parent if is_frozen() else Path(__file__).resolve().parent.parent
+)
+
+BUNDLE_DIR = Path(getattr(sys, '_MEIPASS', BASE_DIR)).resolve()
 
 DEFAULT_CONFIG: dict[str, Any] = {
     'server': {
         'host': '127.0.0.1',
         'port': 20500,
+        # 对外访问地址，留空表示按监听地址或本机网卡推断。
+        'public_url': '',
         'accounts_path': './conf/accounts.json',
         'session_hours': 12,
         'cors_origins': [],
@@ -64,7 +80,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
     },
     'simulator': {
-        'enable': True,
+        # 默认关闭；演示时用 --simulator 或 ROOMSENSE_SIMULATE=1 打开。
+        'enable': False,
         'interval': 5.0,
         'seed': 20260926,
         'devices': [
@@ -85,7 +102,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 
 def deep_merge(base: Any, patch: Any) -> Any:
-    '''递归合并字典，``patch`` 中的叶子值覆盖 ``base``。'''
     if isinstance(base, dict) and isinstance(patch, dict):
         merged = dict(base)
         for key, value in patch.items():
@@ -95,15 +111,27 @@ def deep_merge(base: Any, patch: Any) -> Any:
 
 
 def resolve_path(value: str | os.PathLike[str]) -> Path:
-    '''把配置里的相对路径解析为项目根目录下的绝对路径。'''
     path = Path(value).expanduser()
     if not path.is_absolute():
-        path = ROOT / path
+        path = BASE_DIR / path
     return path.resolve()
 
 
+def resolve_resource(value: str | os.PathLike[str]) -> Path:
+    '''优先用运行目录下的副本，其次用打包进程序的副本。'''
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    external = (BASE_DIR / path).resolve()
+    if not external.exists():
+        bundled = (BUNDLE_DIR / path).resolve()
+        if bundled.exists():
+            return bundled
+    return external
+
+
 def load_config(config_path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
-    '''读取 ``conf/config.json`` 并与默认值合并，再叠加环境变量。'''
+    '''读取 conf/config.json，合并默认值并叠加环境变量。'''
     path = resolve_path(config_path or './conf/config.json')
     config = json.loads(json.dumps(DEFAULT_CONFIG))
     if path.is_file():
@@ -132,7 +160,7 @@ def load_config(config_path: str | os.PathLike[str] | None = None) -> dict[str, 
 
     config['server']['accounts_path'] = str(resolve_path(config['server']['accounts_path']))
     config['storage']['db_path'] = str(resolve_path(config['storage']['db_path']))
-    config['web']['static_dir'] = str(resolve_path(config['web']['static_dir']))
+    config['web']['static_dir'] = str(resolve_resource(config['web']['static_dir']))
     config['device']['key_path'] = str(resolve_path(config['device']['key_path']))
     admin_user = os.environ.get('ROOMSENSE_ADMIN_USER', '').strip()
     admin_password = os.environ.get('ROOMSENSE_ADMIN_PASSWORD', '')
@@ -144,7 +172,6 @@ def load_config(config_path: str | os.PathLike[str] | None = None) -> dict[str, 
 
 
 def read_or_create_secret(path: str | os.PathLike[str], length: int = 32) -> str:
-    '''读取密钥文件；不存在时生成并写入。用于节点接入密钥。'''
     secret_path = Path(path)
     try:
         secret = secret_path.read_text(encoding='utf-8').strip()
@@ -158,13 +185,12 @@ def read_or_create_secret(path: str | os.PathLike[str], length: int = 32) -> str
     try:
         secret_path.chmod(0o600)
     except OSError:
-        # Windows 等平台可能不支持该权限位，密钥文件本身仍可正常工作。
+        # Windows 可能不支持该权限位，不影响功能。
         pass
     return secret
 
 
 def write_secret(path: str | os.PathLike[str], length: int = 32) -> str:
-    '''重新生成密钥并写入文件。'''
     secret = secrets.token_urlsafe(length)
     secret_path = Path(path)
     secret_path.parent.mkdir(parents=True, exist_ok=True)

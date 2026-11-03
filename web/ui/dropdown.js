@@ -1,16 +1,19 @@
+/*
+    ____                       _____
+   / __ \____  ____  ____ ___ / ___/___  ____  ________
+  / /_/ / __ \/ __ \/ __ `__ \\__ \/ _ \/ __ \/ ___/ _ \
+ / _, _/ /_/ / /_/ / / / / / /__/ /  __/ / / (__  )  __/
+/_/ |_|\____/\____/_/ /_/ /_/____/\___/_/ /_/____/\___/
+
+@File      :   web/ui/dropdown.js
+@Author    :   RmCat
+@Contact   :   RemiliaCatNero@gmail.com
+@License   :   AGPL
+@Copyright :   (C) 2026, RoomSense-Team
+@Desc      :   自绘下拉选择器：保留原生 select 的取值与事件，只替换可见外观。
+*/
 'use strict';
 
-/* 自绘下拉选择器：把原生 <select> 增强为与面板主题一致的下拉浮层。
-
-   原生 select 的弹出层由浏览器 / 操作系统绘制，无法跟随面板的浅色、深色主题，
-   因此在保留原生 <select> 作为取值与事件来源（``select.value`` 与 ``change`` 事件
-   照旧可用）的前提下，只替换可见外观。
-
-   键盘：Enter / Space / ↓ 打开，↑↓ 移动，Home / End 首尾，Enter 选中，Esc 关闭，
-   直接输入字符可快速定位；ARIA 使用 combobox + listbox + option。
-
-   本文件属于自绘控件层（``web/ui/``）。动态重建选项后调用
-   ``window.RoomSenseUI.dropdown.refresh(select)`` 同步显示。 */
 (() => {
   const ui = (window.RoomSenseUI = window.RoomSenseUI || {});
   const instances = new WeakMap();
@@ -51,7 +54,7 @@
       this.menu.setAttribute('role', 'listbox');
       this.menu.hidden = true;
       this.wrapper.append(this.trigger, this.menu);
-      // 原生 select 被隐藏后，点击仍会冒泡给外层 label 并转发到 select，这里拦下。
+      // 原生 select 被隐藏后，点击会冒泡到外层 label，这里拦下。
       this.wrapper.addEventListener('click', (event) => event.stopPropagation());
       this.wrapper.addEventListener('pointerdown', (event) => event.stopPropagation());
 
@@ -78,8 +81,6 @@
       live.add(this);
       this.refresh();
     }
-
-    // ------------------------------------------------------------- 数据同步
 
     refresh() {
       this.items = Array.from(this.select.options).map((option) => ({
@@ -125,8 +126,6 @@
       return !this.menu.hidden;
     }
 
-    // ------------------------------------------------------------------ 开关
-
     open() {
       for (const other of live) if (other !== this) other.close();
       this.menu.hidden = false;
@@ -151,8 +150,6 @@
       const spaceBelow = window.innerHeight - rect.bottom;
       return spaceBelow < estimated + 12 && rect.top > estimated + 12;
     }
-
-    // ------------------------------------------------------------------ 选择
 
     setActive(index) {
       if (index < 0 || index >= this.items.length) return;
@@ -189,8 +186,6 @@
       const node = this.menu.querySelector('.select-option.is-active');
       if (node) node.scrollIntoView({ block: 'nearest' });
     }
-
-    // ------------------------------------------------------------------ 键盘
 
     onKeyDown(event) {
       const key = event.key;

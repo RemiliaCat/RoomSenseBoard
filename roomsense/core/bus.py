@@ -1,6 +1,17 @@
-'''进程内事件总线，用于把实时数据推送给 SSE 客户端。
+# -*- encoding: utf-8 -*-
+r'''
+    ____                       _____
+   / __ \____  ____  ____ ___ / ___/___  ____  ________
+  / /_/ / __ \/ __ \/ __ `__ \\__ \/ _ \/ __ \/ ___/ _ \
+ / _, _/ /_/ / /_/ / / / / / /__/ /  __/ / / (__  )  __/
+/_/ |_|\____/\____/_/ /_/ /_/____/\___/_/ /_/____/\___/
 
-每个订阅者持有一个有界队列：队列满时丢弃最旧事件，保证慢客户端不会拖住采集与入库。
+@File      :   roomsense/core/bus.py
+@Author    :   RmCat
+@Contact   :   RemiliaCatNero@gmail.com
+@License   :   AGPL
+@Copyright :   (C) 2026, RoomSense-Team
+@Desc      :   进程内事件总线，把实时数据推送给 SSE 客户端。
 '''
 
 from __future__ import annotations
@@ -12,8 +23,6 @@ from typing import Any
 
 
 class Subscriber:
-    '''单个 SSE 连接的订阅句柄。'''
-
     def __init__(self, limit: int = 256) -> None:
         self._queue: queue.Queue[tuple[str, str] | None] = queue.Queue(maxsize=max(8, limit))
 
@@ -31,7 +40,6 @@ class Subscriber:
                 pass
 
     def get(self, timeout: float = 15.0) -> tuple[str, str] | None:
-        '''取出下一条事件；超时返回 ``None``（调用方应发送保活心跳）。'''
         try:
             return self._queue.get(timeout=timeout)
         except queue.Empty:
@@ -45,8 +53,6 @@ class Subscriber:
 
 
 class EventBus:
-    '''极简发布/订阅实现。'''
-
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._subscribers: set[Subscriber] = set()
@@ -62,7 +68,6 @@ class EventBus:
             self._subscribers.discard(subscriber)
 
     def publish(self, event: str, payload: dict[str, Any]) -> None:
-        '''广播事件；事件类型与 JSON 文本只序列化一次。'''
         data = json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
         with self._lock:
             subscribers = list(self._subscribers)

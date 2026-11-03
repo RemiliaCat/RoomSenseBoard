@@ -1,3 +1,16 @@
+#     ____                       _____
+#    / __ \____  ____  ____ ___ / ___/___  ____  ________
+#   / /_/ / __ \/ __ \/ __ `__ \\__ \/ _ \/ __ \/ ___/ _ \
+#  / _, _/ /_/ / /_/ / / / / / /__/ /  __/ / / (__  )  __/
+# /_/ |_|\____/\____/_/ /_/ /_/____/\___/_/ /_/____/\___/
+#
+# @File      :   pyproject.toml
+# @Author    :   RmCat
+# @Contact   :   RemiliaCatNero@gmail.com
+# @License   :   AGPL
+# @Copyright :   (C) 2026, RoomSense-Team
+# @Desc      :   项目元数据、运行期依赖与开发依赖。
+
 [project]
 name = "roomsenseboard"
 version = "0.1.0"
@@ -6,9 +19,15 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 
-# RoomSenseBoard 目前只使用 Python 标准库，运行时没有第三方依赖。
+# 运行时只用标准库，没有第三方依赖。
 dependencies = []
 
 [tool.uv]
-# 这是一个可直接运行的应用项目，不需要作为 Python 包安装。
+# 直接运行，不作为 Python 包安装。
 package = false
+
+[dependency-groups]
+# 仅打包发布需要，运行时零依赖；安装：uv sync。
+dev = [
+    "pyinstaller>=6.0",
+]

@@ -1,4 +1,19 @@
 <!doctype html>
+<!--
+    ____                       _____
+   / __ \____  ____  ____ ___ / ___/___  ____  ________
+  / /_/ / __ \/ __ \/ __ `__ \\__ \/ _ \/ __ \/ ___/ _ \
+ / _, _/ /_/ / /_/ / / / / / /__/ /  __/ / / (__  )  __/
+/_/ |_|\____/\____/_/ /_/ /_/____/\___/_/ /_/____/\___/
+
+@File      :   web/index.html
+@Author    :   RmCat
+@Contact   :   RemiliaCatNero@gmail.com
+@License   :   AGPL
+@Copyright :   (C) 2026, RoomSense-Team
+@Desc      :   面板页面结构。
+-->
+
 <html lang="zh-CN">
 
 <head>
@@ -6,7 +21,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="color-scheme" content="light dark" />
     <title>RoomSenseBoard · 室内环境感知</title>
-  <link rel="icon" href="/static/logo.svg" type="image/svg+xml" />
+  <link rel="icon" href="/static/favicon.ico" />
   <script src="/static/theme.js"></script>
     <script src="/static/config.js"></script>
     <link rel="stylesheet" href="/static/style.css" />
@@ -24,8 +39,7 @@
   <section id="login" class="login" hidden>
     <form id="login-form" class="panel login-card">
       <div class="brand">
-        <!-- 标识占位符：替换 web/logo.svg 即可 -->
-        <img class="brand-logo" src="/static/logo.svg" alt="" width="64" height="64" />
+        <img class="brand-logo" src="/static/logo.png" alt="" width="64" height="64" />
         <div class="brand-text">
           <strong>RoomSense</strong>
           <span>室内环境感知</span>
@@ -51,7 +65,7 @@
   <div id="shell" hidden>
     <aside>
       <div class="brand">
-        <img class="brand-logo" src="/static/logo.svg" alt="" width="44" height="44" />
+        <img class="brand-logo" src="/static/logo.png" alt="" width="44" height="44" />
         <div class="brand-text">
           <strong>RoomSense</strong>
           <span>室内环境感知</span>
@@ -302,9 +316,21 @@
           <h2>设备接入</h2>
           <p class="hint">
             RA4M2 节点通过 HTTP POST 上报 JSON；下面的地址与节点密钥可以直接写进固件配置。
-            同一局域网内请把 <code>127.0.0.1</code> 换成本机实际 IP。
+            监听 <code>0.0.0.0</code> 时地址按本机网卡自动推断；部署在域名或反向代理后面时，
+            在下面填写对外地址，面板与上报地址都会改用它。
           </p>
+          <form id="public-url-form">
+            <div class="form-grid">
+              <label>对外访问地址<input id="set-public-url" type="url" autocomplete="off"
+                  placeholder="https://panel.example.com:20500" /></label>
+            </div>
+            <div class="toolbar">
+              <button type="submit" class="primary">保存对外地址</button>
+              <span id="public-url-note" class="hint"></span>
+            </div>
+          </form>
           <div id="device-info" class="kv-grid"></div>
+          <div id="ingest-addresses" class="hint"></div>
           <div class="code-block">
             <pre id="ingest-example"></pre>
           </div>

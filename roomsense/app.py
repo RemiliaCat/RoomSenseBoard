@@ -1,4 +1,18 @@
-'''应用装配：把存储、网关、账号、模拟器与维护任务组装成可启动的 App。'''
+# -*- encoding: utf-8 -*-
+r'''
+    ____                       _____
+   / __ \____  ____  ____ ___ / ___/___  ____  ________
+  / /_/ / __ \/ __ \/ __ `__ \\__ \/ _ \/ __ \/ ___/ _ \
+ / _, _/ /_/ / /_/ / / / / / /__/ /  __/ / / (__  )  __/
+/_/ |_|\____/\____/_/ /_/ /_/____/\___/_/ /_/____/\___/
+
+@File      :   roomsense/app.py
+@Author    :   RmCat
+@Contact   :   RemiliaCatNero@gmail.com
+@License   :   AGPL
+@Copyright :   (C) 2026, RoomSense-Team
+@Desc      :   应用装配：把存储、网关、账号、模拟器与维护任务组装成可启动的 App。
+'''
 
 from __future__ import annotations
 
@@ -17,8 +31,6 @@ from .core.storage import Storage
 
 
 class Maintenance(threading.Thread):
-    '''周期任务：离线检测与历史数据清理。'''
-
     def __init__(self, app: 'App', interval: float = 5.0, prune_interval: float = 3600.0) -> None:
         super().__init__(name='roomsense-maintenance', daemon=True)
         self.app = app
@@ -42,8 +54,6 @@ class Maintenance(threading.Thread):
 
 
 class App:
-    '''把各组件组装成一个可启动的应用。'''
-
     def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
         self.version = __version__
@@ -79,8 +89,6 @@ class App:
         self.maintenance = Maintenance(self)
         self._started = False
 
-    # ------------------------------------------------------------------ 生命周期
-
     def start(self) -> None:
         if self._started:
             return
@@ -109,10 +117,7 @@ class App:
         self.storage.add_log('INFO', 'server', '服务已停止')
         self.storage.close()
 
-    # ------------------------------------------------------------------ 账号
-
     def reset_password(self, username: str | None = None) -> tuple[str, str]:
-        '''把某个账号的密码重置为随机值，返回 ``(用户名, 新密码)``。'''
         target = username or self.admin_user
         if self.accounts.find(target) is None:
             raise ValueError(f'账号不存在：{target}')
@@ -121,8 +126,6 @@ class App:
         self.sessions.revoke_user(target)
         self.storage.add_log('WARN', 'auth', f'账号 {target} 的密码已被重置')
         return target, password
-
-    # ------------------------------------------------------------------ 设置
 
     def runtime_settings(self) -> dict[str, Any]:
         return dict(self.settings)
@@ -145,8 +148,6 @@ class App:
         result = self.storage.prune(int(self.settings.get('retention_days', 30)))
         self.storage.prune_logs(20000)
         return result
-
-    # ------------------------------------------------------------------ 状态
 
     def status(self) -> dict[str, Any]:
         stats = self.storage.stats(offline_timeout=int(self.settings.get('offline_timeout', 90)))

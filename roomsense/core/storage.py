@@ -1,7 +1,17 @@
-'''SQLite 持久化层：节点、读数、告警、日志与运行设置的 SQL 都集中在这里。
+# -*- encoding: utf-8 -*-
+r'''
+    ____                       _____
+   / __ \____  ____  ____ ___ / ___/___  ____  ________
+  / /_/ / __ \/ __ \/ __ `__ \\__ \/ _ \/ __ \/ ___/ _ \
+ / _, _/ /_/ / /_/ / / / / / /__/ /  __/ / / (__  )  __/
+/_/ |_|\____/\____/_/ /_/ /_/____/\___/_/ /_/____/\___/
 
-连接由一把可重入锁保护，配合 ``check_same_thread=False`` 供 HTTP、SSE 与模拟器线程
-共用；数据量与写入频率很低，单连接即可避免多连接下的锁竞争。
+@File      :   roomsense/core/storage.py
+@Author    :   RmCat
+@Contact   :   RemiliaCatNero@gmail.com
+@License   :   AGPL
+@Copyright :   (C) 2026, RoomSense-Team
+@Desc      :   SQLite 持久化层：节点、读数、告警、日志与运行设置的 SQL。
 '''
 
 from __future__ import annotations
@@ -93,8 +103,6 @@ def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
 
 
 class Storage:
-    '''封装连接、建表与全部查询。'''
-
     def __init__(self, db_path: str | os.PathLike[str]) -> None:
         self.path = Path(db_path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -109,7 +117,7 @@ class Storage:
             self._conn.commit()
 
     def _migrate(self) -> None:
-        '''为早期数据库补齐后加的列（SQLite 不支持 ADD COLUMN IF NOT EXISTS）。'''
+        '''为早期数据库补齐后加的列。'''
         additions = {
             'readings': (('pm25', 'REAL'), ('noise', 'REAL')),
             'nodes': (('last_pm25', 'REAL'), ('last_noise', 'REAL')),
@@ -119,8 +127,6 @@ class Storage:
             for name, column_type in columns:
                 if name not in existing:
                     self._conn.execute(f'ALTER TABLE {table} ADD COLUMN {name} {column_type}')
-
-    # ---------------------------------------------------------------- 基础工具
 
     def close(self) -> None:
         with self._lock:
@@ -142,16 +148,8 @@ class Storage:
             self._conn.commit()
             return cursor
 
-    # ------------------------------------------------------------------- 节点
-
     def record_reading(self, reading: dict[str, Any]) -> dict[str, Any]:
-        '''写入一条读数，并更新节点最近状态。
-
-        同一 ``(device_id, ts)`` 重复上报时按“最新值覆盖”处理：更新该行内容而不是
-        丢弃，这样设备在一秒内连发多条数据也不会丢失；``reading_count`` 只统计
-        新增的时间点。只有比节点当前状态更新的数据才会改写 ``last_*`` 快照字段，
-        避免补传历史数据把实时状态改旧。
-        '''
+        '''写入一条读数并更新节点快照；同一 (device_id, ts) 覆盖。'''
         now = int(time.time())
         ts = int(reading['ts'])
         device_id = reading['device_id']
@@ -196,7 +194,7 @@ class Storage:
                     (device_id, ts) + values,
                 )
             else:
-                # 同一秒内的后续上报：只覆盖非空字段。
+                # 同一秒的后续上报只覆盖非空字段。
                 self._conn.execute(
                     '''
                     UPDATE readings SET
@@ -292,7 +290,6 @@ class Storage:
         return self.get_node(device_id)
 
     def node_totals(self, device_id: str) -> dict[str, int]:
-        '''统计某节点的历史数据量，用于删除前的确认提示。'''
         readings = self._query_one('SELECT COUNT(*) AS total FROM readings WHERE device_id = ?', (device_id,))
         alerts = self._query_one('SELECT COUNT(*) AS total FROM alerts WHERE device_id = ?', (device_id,))
         active = self._query_one(
@@ -306,14 +303,7 @@ class Storage:
         }
 
     def delete_node(self, device_id: str, purge: bool = False, ts: int | None = None) -> dict[str, Any] | None:
-        '''删除节点。
-
-        - ``purge=False``：只删除节点记录，保留历史读数；该节点的活跃告警会被关闭
-          （节点已不存在，留着"未处理/已确认"没有意义），消息改写为节点已移除。
-        - ``purge=True``：连同该节点的全部读数与告警一起删除，历史数据也不再可查。
-
-        日志（logs 表）是全局审计记录，两种模式都不删除。
-        '''
+        '''删除节点；purge=True 时连读数与告警一起删。'''
         node = self.get_node(device_id)
         if node is None:
             return None
@@ -346,8 +336,6 @@ class Storage:
             'closed_alerts': totals['active_alerts'] if not purge else 0,
         }
 
-    # ------------------------------------------------------------------- 读数
-
     def readings_between(
         self,
         start: int,
@@ -355,7 +343,6 @@ class Storage:
         device_id: str | None = None,
         limit: int = 5000,
     ) -> list[dict[str, Any]]:
-        '''返回原始读数，按设备与时间升序。'''
         sql = '''
             SELECT device_id, ts, temperature, humidity, co2, pm25, noise, light, battery, rssi
             FROM readings
@@ -408,8 +395,6 @@ class Storage:
                 if row[key] is not None:
                     row[key] = round(float(row[key]), 2)
         return rows
-
-    # ------------------------------------------------------------------- 告警
 
     ACTIVE_STATES = ('open', 'acknowledged')
 
@@ -536,8 +521,6 @@ class Storage:
         counts['active'] = counts['open'] + counts['acknowledged']
         return counts
 
-    # ------------------------------------------------------------------- 日志
-
     def add_log(self, level: str, source: str, message: str, ts: int | None = None) -> dict[str, Any]:
         level = level.upper()
         if level not in LOG_LEVELS:
@@ -585,8 +568,6 @@ class Storage:
         )
         return int(cursor.rowcount or 0)
 
-    # ------------------------------------------------------------------- 设置
-
     def get_runtime_settings(self, defaults: dict[str, Any]) -> dict[str, Any]:
         row = self._query_one('SELECT value FROM settings WHERE key = ?', (RUNTIME_SETTINGS_KEY,))
         stored: dict[str, Any] = {}
@@ -614,8 +595,6 @@ class Storage:
             (RUNTIME_SETTINGS_KEY, json.dumps(settings, ensure_ascii=False), int(time.time())),
         )
         return settings
-
-    # --------------------------------------------------------------- 统计维护
 
     def stats(self, offline_timeout: int = 90) -> dict[str, Any]:
         nodes = self.list_nodes(offline_timeout=offline_timeout)

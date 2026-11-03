@@ -1,9 +1,19 @@
+/*
+    ____                       _____
+   / __ \____  ____  ____ ___ / ___/___  ____  ________
+  / /_/ / __ \/ __ \/ __ `__ \\__ \/ _ \/ __ \/ ___/ _ \
+ / _, _/ /_/ / /_/ / / / / / /__/ /  __/ / / (__  )  __/
+/_/ |_|\____/\____/_/ /_/ /_/____/\___/_/ /_/____/\___/
+
+@File      :   web/chart.js
+@Author    :   RmCat
+@Contact   :   RemiliaCatNero@gmail.com
+@License   :   AGPL
+@Copyright :   (C) 2026, RoomSense-Team
+@Desc      :   轻量 Canvas 折线图：双轴、自适应网格与悬停读数。
+*/
 'use strict';
 
-/* 轻量 Canvas 折线图，无第三方依赖。
-
-   每个序列可以指定 axis: 0（左侧）或 1（右侧），两条轴各自独立缩放，因此温度与
-   湿度这类量纲不同的数据可以画在同一张图里。主题切换时自动重绘。 */
 class LineChart {
   constructor(canvas, options = {}) {
     this.canvas = canvas;
@@ -77,8 +87,6 @@ class LineChart {
     });
   }
 
-  /* --------------------------------------------------------------- 绘制 */
-
   render() {
     const canvas = this.canvas;
     const rect = canvas.getBoundingClientRect();
@@ -149,7 +157,6 @@ class LineChart {
     ctx.font = '11px system-ui, "Microsoft YaHei", sans-serif';
     ctx.textBaseline = 'middle';
 
-    // 水平网格与左右两轴的刻度
     const ticks = Math.max(2, Math.min(6, Math.round(plot.height / 46)));
     for (let index = 0; index <= ticks; index += 1) {
       const y = plot.y + (plot.height / ticks) * index;
@@ -169,7 +176,6 @@ class LineChart {
       }
     }
 
-    // 垂直网格与时间刻度
     const verticalTicks = Math.max(2, Math.min(6, Math.round(plot.width / 110)));
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
@@ -185,7 +191,6 @@ class LineChart {
       ctx.fillText(formatTime(ts, timeSpan), x, plot.y + plot.height + 8);
     }
 
-    // 数据线
     for (const item of visible) {
       ctx.strokeStyle = item.color;
       ctx.lineWidth = 2;
@@ -207,7 +212,7 @@ class LineChart {
         ctx.closePath();
         ctx.fillStyle = gradient;
         ctx.fill();
-        // 重新描线，避免填充覆盖线条
+        // 重新描线，避免填充盖住线条
         ctx.beginPath();
         item.points.forEach((point, index) => {
           const x = xScale(point[0]);
@@ -242,8 +247,6 @@ class LineChart {
     }
     return { min: low, max: high, step };
   }
-
-  /* --------------------------------------------------------------- 交互 */
 
   handleMove(event) {
     if (!this.geometry) return;

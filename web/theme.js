@@ -1,6 +1,19 @@
+/*
+    ____                       _____
+   / __ \____  ____  ____ ___ / ___/___  ____  ________
+  / /_/ / __ \/ __ \/ __ `__ \\__ \/ _ \/ __ \/ ___/ _ \
+ / _, _/ /_/ / /_/ / / / / / /__/ /  __/ / / (__  )  __/
+/_/ |_|\____/\____/_/ /_/ /_/____/\___/_/ /_/____/\___/
+
+@File      :   web/theme.js
+@Author    :   RmCat
+@Contact   :   RemiliaCatNero@gmail.com
+@License   :   AGPL
+@Copyright :   (C) 2026, RoomSense-Team
+@Desc      :   主题切换：跟随系统 / 浅色 / 深色三档。
+*/
 'use strict';
 
-/* 主题切换：与 OlivOS WebUI 相同的三档模式（跟随系统 / 浅色 / 深色）。 */
 (() => {
   const storageKey = 'roomsense.panel.theme';
   const systemTheme = window.matchMedia('(prefers-color-scheme: dark)');
@@ -11,7 +24,6 @@
     const saved = localStorage.getItem(storageKey);
     if (modes.includes(saved)) mode = saved;
   } catch {
-    // 浏览器禁用本地存储时仍然允许切换，只是不持久化。
   }
 
   function applyTheme() {
@@ -19,7 +31,7 @@
       mode === 'system' ? (systemTheme.matches ? 'dark' : 'light') : mode;
     document.querySelectorAll('[data-theme-select]').forEach((select) => {
       select.value = mode;
-      // 自绘下拉需要显式同步显示文本（直接赋值不会触发 change 事件）。
+      // 自绘下拉要手动同步显示文本。
       if (window.RoomSenseUI && window.RoomSenseUI.dropdown) {
         window.RoomSenseUI.dropdown.refresh(select);
       }
@@ -44,7 +56,6 @@
         try {
           localStorage.setItem(storageKey, mode);
         } catch {
-          // 无法持久化时保持本次会话生效。
         }
       });
     });
