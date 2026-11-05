@@ -13,7 +13,7 @@
 
 [project]
 name = "roomsenseboard"
-version = "0.1.0"
+version = "0.3.1"
 description = "RoomSenseBoard 室内环境感知与监控系统"
 readme = "README.md"
 requires-python = ">=3.10"

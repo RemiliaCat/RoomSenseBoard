@@ -11,7 +11,7 @@ r'''
 @Contact   :   RemiliaCatNero@gmail.com
 @License   :   AGPL
 @Copyright :   (C) 2026, RoomSense-Team
-@Desc      :   账号与会话：PBKDF2 口令摘要、内存会话与登录限速。
+@Desc      :   账号与会话：口令存储（明文）、内存会话与登录限速。
 '''
 
 from __future__ import annotations
@@ -26,38 +26,32 @@ import time
 from pathlib import Path
 from typing import Any
 
+# 仅用于校验历史版本留下的摘要：新写入的口令一律按项目要求保存明文。
 PBKDF2_ITERATIONS = 240_000
 PASSWORD_MIN_LENGTH = 8
 PASSWORD_ALPHABET = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789@#%+=?'
+
+PASSWORD_ALGORITHM = 'plain'
+LEGACY_ALGORITHM = 'pbkdf2_sha256'
 
 
 def generate_password(length: int = 14) -> str:
     return ''.join(secrets.choice(PASSWORD_ALPHABET) for _ in range(max(8, int(length))))
 
 
-def hash_password(
-    password: str,
-    *,
-    iterations: int = PBKDF2_ITERATIONS,
-    salt: bytes | None = None,
-) -> dict[str, Any]:
+def password_record(password: str) -> dict[str, Any]:
+    '''生成账号文件里的口令记录。
+
+    按项目约定直接保存明文，方便在 ``conf/accounts.json`` 里直接查看与找回；代价是能读到这个
+    文件就等于拿到全部口令，请保持文件 0600 权限，不要提交进仓库或发给别人。
+    '''
     if not isinstance(password, str) or not password:
         raise ValueError('密码不能为空')
-    salt_bytes = salt if salt is not None else secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt_bytes, int(iterations))
-    return {
-        'algorithm': 'pbkdf2_sha256',
-        'iterations': int(iterations),
-        'salt': salt_bytes.hex(),
-        'hash': digest.hex(),
-    }
+    return {'algorithm': PASSWORD_ALGORITHM, 'value': password}
 
 
-def verify_password(password: str, record: dict[str, Any]) -> bool:
-    if not isinstance(password, str) or not isinstance(record, dict):
-        return False
-    if record.get('algorithm') != 'pbkdf2_sha256':
-        return False
+def _verify_legacy(password: str, record: dict[str, Any]) -> bool:
+    '''校验历史版本留下的 PBKDF2 摘要，只在迁移旧账号文件时使用。'''
     try:
         salt = bytes.fromhex(str(record['salt']))
         expected = bytes.fromhex(str(record['hash']))
@@ -68,13 +62,33 @@ def verify_password(password: str, record: dict[str, Any]) -> bool:
     return hmac.compare_digest(digest, expected)
 
 
+def verify_password(password: str, record: dict[str, Any] | str) -> bool:
+    '''校验口令；历史版本的加盐摘要仍然可用，登录成功后会被迁移成明文。'''
+    if not isinstance(password, str) or not password:
+        return False
+    if isinstance(record, str):
+        return hmac.compare_digest(record, password)
+    if not isinstance(record, dict):
+        return False
+    algorithm = record.get('algorithm')
+    if algorithm == PASSWORD_ALGORITHM:
+        stored = record.get('value')
+        return isinstance(stored, str) and hmac.compare_digest(stored, password)
+    if algorithm == LEGACY_ALGORITHM:
+        return _verify_legacy(password, record)
+    return False
+
+
+def is_legacy_record(record: Any) -> bool:
+    return isinstance(record, dict) and record.get('algorithm') == LEGACY_ALGORITHM
+
+
 class AccountStore:
     VERSION = 1
 
     def __init__(self, path: str | os.PathLike[str]) -> None:
         self.path = Path(path)
         self._lock = threading.RLock()
-        self._dummy_record: dict[str, Any] | None = None
 
     def _empty(self) -> dict[str, Any]:
         return {'version': self.VERSION, 'users': []}
@@ -136,7 +150,7 @@ class AccountStore:
         data['users'].append(
             {
                 'username': username,
-                'password': hash_password(password),
+                'password': password_record(password),
                 'created_at': now,
                 'updated_at': now,
             }
@@ -149,7 +163,7 @@ class AccountStore:
         target = username.strip().lower()
         for user in data['users']:
             if str(user.get('username', '')).strip().lower() == target:
-                user['password'] = hash_password(password)
+                user['password'] = password_record(password)
                 user['updated_at'] = int(time.time())
                 self.save(data)
                 return True
@@ -158,12 +172,19 @@ class AccountStore:
     def verify(self, username: str, password: str) -> bool:
         user = self.find(username)
         if user is None:
-            # 用户不存在时也做一次派生，避免用响应时间区分账号是否存在。
-            if self._dummy_record is None:
-                self._dummy_record = hash_password('roomsense-placeholder')
-            verify_password(password, self._dummy_record)
+            # 用户不存在时也做一次比较，避免用返回快慢区分账号是否存在。
+            hmac.compare_digest('roomsense-placeholder', password if isinstance(password, str) else '')
             return False
-        return verify_password(password, user.get('password') or {})
+        record = user.get('password')
+        if not verify_password(password, record):
+            return False
+        if is_legacy_record(record):
+            # 老版本存的是加盐摘要：登录成功后顺手迁移成明文，省得再重置一次。
+            try:
+                self.set_password(str(user.get('username')), password)
+            except ValueError:
+                pass
+        return True
 
     def ensure_user(self, username: str = 'admin', password: str | None = None) -> tuple[str, str | None]:
         '''确保账号存在，返回 (用户名, 本次生成的初始密码或 None)。'''

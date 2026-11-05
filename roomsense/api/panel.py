@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import re
+import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -27,8 +28,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from ..app import App
 from ..core.auth import PASSWORD_MIN_LENGTH
-from ..netinfo import join_url, resolve_endpoint
 from ..core.gateway import ValidationError
+from ..netinfo import cached_public_address, join_url, normalize_public_url, resolve_endpoint
 from .errors import ApiError
 
 # 时间范围 → (窗口秒数, 聚合桶秒数)
@@ -53,6 +54,16 @@ class PanelHTTPServer(ThreadingHTTPServer):
     def __init__(self, address: tuple[str, int], app: App) -> None:
         self.app = app
         super().__init__(address, RequestHandler)
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        '''公网扫描器经常在请求读完前断开；这些断开不是服务故障，不打印 traceback。'''
+        error = sys.exc_info()[1]
+        if isinstance(
+            error,
+            (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, TimeoutError),
+        ):
+            return
+        super().handle_error(request, client_address)
 
 
 class RequestHandler(BaseHTTPRequestHandler):
@@ -101,7 +112,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 raise ApiError(405, '不支持的请求方法')
         except ApiError as error:
             self._send_json({'ok': False, 'error': error.message}, status=error.status, head_only=method == 'HEAD')
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
             self.close_connection = True
         except Exception as error:  # pragma: no cover - 兜底保护
             try:
@@ -174,28 +185,28 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._delete_node(device_id, query)
                 return
 
+        if path == '/api/live' and method in ('GET', 'HEAD'):
+            self._live_readings(query)
+            return
+
         if path == '/api/readings' and method in ('GET', 'HEAD'):
             self._readings(query)
             return
 
-        alert_ack = re.fullmatch(r'/api/alerts/(\d+)/ack', path)
-        if alert_ack and method == 'POST':
-            alert = app.storage.acknowledge_alert(int(alert_ack.group(1)))
-            if alert is None:
-                raise ApiError(404, '告警不存在')
-            app.bus.publish('alert', alert)
-            app.storage.add_log('INFO', 'alert', f"告警 #{alert['id']} 已确认")
-            self._send_json({'ok': True, 'alert': alert})
+        alert_action = re.fullmatch(r'/api/alerts/(\d+)/(ack|mute|resolve)', path)
+        if alert_action and method == 'POST':
+            self._alert_action(int(alert_action.group(1)), alert_action.group(2), username)
             return
 
         if path == '/api/alerts' and method in ('GET', 'HEAD'):
             states = {
-                'active': ('open', 'acknowledged'),
+                'active': ('open', 'acknowledged', 'muted'),
                 'open': ('open',),
                 'acknowledged': ('acknowledged',),
+                'muted': ('muted',),
                 'resolved': ('resolved',),
                 'all': None,
-            }.get((query.get('state') or ['active'])[0], ('open', 'acknowledged'))
+            }.get((query.get('state') or ['active'])[0], ('open', 'acknowledged', 'muted'))
             limit = _clamp_int((query.get('limit') or ['200'])[0], 200, 1, 1000)
             alerts = app.storage.list_alerts(states=states, limit=limit)
             self._send_json(
@@ -203,15 +214,16 @@ class RequestHandler(BaseHTTPRequestHandler):
                     'ok': True,
                     'alerts': alerts,
                     'counts': app.storage.alert_counts(),
+                    'severity_counts': app.storage.alert_severity_counts(),
                     'server_time': int(time.time()),
                 }
             )
             return
 
         if path == '/api/alerts/ack' and method == 'POST':
-            changed = app.storage.acknowledge_all()
+            changed = app.storage.acknowledge_all(username)
             app.bus.publish('alerts_ack', {'count': changed})
-            app.storage.add_log('INFO', 'alert', f'已确认 {changed} 条未处理告警')
+            app.storage.add_log('INFO', 'alert', f'{username} 确认了 {changed} 条未处理告警')
             self._send_json({'ok': True, 'count': changed, 'counts': app.storage.alert_counts()})
             return
 
@@ -314,7 +326,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         node = app.storage.get_node(device_id)
         if node is None:
             raise ApiError(404, '节点不存在')
-        minutes = int(app.runtime_settings().get('live_window_minutes', 30))
+        minutes = int(app.runtime_settings().get('live_window_minutes', 25))
         end = int(time.time())
         readings = app.storage.readings_between(end - minutes * 60, end, device_id=device_id, limit=2000)
         node = dict(node)
@@ -410,12 +422,76 @@ class RequestHandler(BaseHTTPRequestHandler):
             }
         )
 
+    def _live_readings(self, query: dict[str, list[str]]) -> None:
+        '''单节点滑动窗口原始读数，供实时趋势使用。'''
+        app = self.app
+        device_id = (query.get('device_id') or [''])[0]
+        if not device_id:
+            raise ApiError(400, '缺少 device_id')
+        default_minutes = int(app.runtime_settings().get('live_window_minutes', 25))
+        minutes = _clamp_int((query.get('minutes') or [str(default_minutes)])[0], default_minutes, 5, 120)
+        end = int(time.time())
+        start = end - minutes * 60
+        readings = app.storage.readings_between(start, end, device_id=device_id, limit=5000)
+        self._send_json(
+            {
+                'ok': True,
+                'device_id': device_id,
+                'minutes': minutes,
+                'start': start,
+                'end': end,
+                'readings': readings,
+            }
+        )
+
+    def _alert_action(self, alert_id: int, action: str, username: str) -> None:
+        app = self.app
+        body = self._read_json()
+        current = app.storage.get_alert(alert_id)
+        if current is None:
+            raise ApiError(404, '告警不存在')
+        if current['state'] == 'resolved':
+            raise ApiError(409, '告警已恢复，无需再处理')
+        note = body.get('note')
+        note = note.strip()[:200] if isinstance(note, str) else ''
+        if action == 'ack':
+            alert = app.storage.acknowledge_alert(alert_id, username, note)
+            label = '确认'
+        elif action == 'mute':
+            minutes = _clamp_int(str(body.get('minutes') or 60), 60, 5, 1440)
+            alert = app.storage.mute_alert(alert_id, minutes, username, note)
+            label = f'静默 {minutes} 分钟'
+        else:
+            alert = app.storage.resolve_alert_manual(alert_id, username, note)
+            label = '关闭'
+        if alert is None:
+            raise ApiError(404, '告警不存在')
+        app.bus.publish('alert', alert)
+        app.storage.add_log('INFO', 'alert', f"{username} {label}了告警 #{alert_id}（{alert['device_name']}）")
+        self._send_json({'ok': True, 'alert': alert})
+
+    def _request_origin(self) -> str:
+        '''当前请求来自哪个地址；用于设置页“使用当前访问地址”。'''
+        host_header = str(self.headers.get('Host') or '').strip()
+        if not host_header:
+            return ''
+        scheme = str(self.headers.get('X-Forwarded-Proto') or 'http').split(',')[0].strip().lower()
+        if scheme not in ('http', 'https'):
+            scheme = 'http'
+        try:
+            return normalize_public_url(f'{scheme}://{host_header}')
+        except ValueError:
+            return ''
+
     def _settings_payload(self) -> dict[str, Any]:
         app = self.app
         host, port = self.server.server_address[0], self.server.server_address[1]  # type: ignore[attr-defined]
         status = app.status()
         settings = app.runtime_settings()
-        endpoint = resolve_endpoint(str(settings.get('public_url') or ''), str(host), int(port))
+        public = cached_public_address()
+        endpoint = resolve_endpoint(
+            str(settings.get('public_url') or ''), str(host), int(port), public=public
+        )
         return {
             'ok': True,
             'settings': settings,
@@ -436,6 +512,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                 'public_url': endpoint.base_url,
                 'public_url_source': endpoint.source,
                 'address_candidates': list(endpoint.candidates),
+                'request_origin': self._request_origin(),
+                'detected_public_ip': public.address if public else '',
+                'detected_public_ip_source': public.source if public else '',
             },
             'server_time': status['server_time'],
         }
@@ -478,26 +557,41 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def _serve_static(self, path: str, head_only: bool = False) -> None:
         static_dir = Path(self.app.config['web']['static_dir'])
+        special: dict[str, tuple[str, str]] = {
+            '/manifest.webmanifest': ('manifest.webmanifest', 'application/manifest+json; charset=utf-8'),
+            '/sw.js': ('sw.js', 'text/javascript; charset=utf-8'),
+            '/favicon.ico': ('favicon.ico', 'image/x-icon'),
+        }
         if path in ('/', '/index.html'):
             target = static_dir / 'index.html'
+            content_type = 'text/html; charset=utf-8'
+        elif path in special:
+            name, content_type = special[path]
+            target = static_dir / name
         elif path.startswith('/static/'):
             relative = path[len('/static/'):]
             target = (static_dir / relative).resolve()
             if not _inside(target, static_dir):
                 raise ApiError(403, '非法的资源路径')
+            content_type = mimetypes.guess_type(str(target))[0] or 'application/octet-stream'
+            if target.suffix in ('.html', '.js', '.css', '.svg'):
+                content_type += '; charset=utf-8'
         else:
             raise ApiError(404, '页面不存在')
         if not target.is_file():
             raise ApiError(404, '资源不存在')
 
-        content_type = mimetypes.guess_type(str(target))[0] or 'application/octet-stream'
-        if target.suffix in ('.html', '.js', '.css', '.svg'):
-            content_type += '; charset=utf-8'
         body = target.read_bytes()
         self.send_response(200)
         self.send_header('Content-Type', content_type)
         self.send_header('Content-Length', str(len(body)))
-        self.send_header('Cache-Control', 'no-store')
+        if path == '/sw.js':
+            self.send_header('Cache-Control', 'no-cache')
+            self.send_header('Service-Worker-Allowed', '/')
+        elif path == '/manifest.webmanifest':
+            self.send_header('Cache-Control', 'no-cache')
+        else:
+            self.send_header('Cache-Control', 'no-store')
         self.send_header('X-Content-Type-Options', 'nosniff')
         for name, value in self._cors_headers():
             self.send_header(name, value)

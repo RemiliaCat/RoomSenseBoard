@@ -37,13 +37,13 @@ EPISODES: dict[str, dict[str, Any]] = {
         'co2_range': (1350.0, 1850.0),
         'temperature': 1.6,
         'humidity': 5.0,
-        'noise': 14.0,
+        'noise': 20.0,
         'duration': (100, 200),
     },
     'window': {'temperature': -6.5, 'humidity': -12.0, 'pm25': -8.0, 'noise': 6.0, 'duration': (110, 210)},
-    'equipment': {'temperature': 7.5, 'co2_offset': 150.0, 'noise': 7.0, 'duration': (70, 150)},
+    'equipment': {'temperature': 7.5, 'co2_offset': 150.0, 'noise': 10.0, 'duration': (70, 150)},
     'dry': {'humidity': -24.0, 'duration': (120, 220)},
-    'dust': {'pm25': 45.0, 'humidity': -6.0, 'noise': 4.0, 'duration': (120, 240)},
+    'dust': {'pm25': 90.0, 'humidity': -6.0, 'noise': 4.0, 'duration': (120, 240)},
 }
 
 

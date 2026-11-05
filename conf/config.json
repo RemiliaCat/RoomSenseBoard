@@ -11,7 +11,10 @@
     "storage": {
         "db_path": "./data/roomsense.db",
         "retention_days": 30,
-        "live_window_minutes": 30
+        "live_window_minutes": 25
+    },
+    "logging": {
+        "console_level": "INFO"
     },
     "web": {
         "static_dir": "./web"
@@ -40,6 +43,26 @@
             "high": 1000.0,
             "critical_high": 1500.0,
             "hysteresis": 50.0
+        },
+        "pm25": {
+            "high": 75.0,
+            "critical_high": 150.0,
+            "hysteresis": 10.0
+        },
+        "noise": {
+            "high": 70.0,
+            "critical_high": 85.0,
+            "hysteresis": 5.0
+        },
+        "light": {
+            "low": 80.0,
+            "critical_low": 30.0,
+            "hysteresis": 15.0
+        },
+        "battery": {
+            "low": 3.5,
+            "critical_low": 3.3,
+            "hysteresis": 0.05
         }
     },
     "simulator": {

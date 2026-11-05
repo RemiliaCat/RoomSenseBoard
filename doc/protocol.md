@@ -160,36 +160,87 @@ client.loop_start()
 | `GET /api/account` | 当前账号信息、账号数量与在线会话数 |
 | `POST /api/account/password` | 修改密码：`{current_password, new_password}`，其他会话立即失效 |
 | `GET /api/health` | 服务状态、运行时长、节点与读数统计（无需鉴权，用于探活） |
-| `GET /api/overview` | 仪表盘聚合数据：统计、节点、活跃告警、平均值、运行状态 |
+| `GET /api/overview` | 仪表盘聚合数据：统计、节点、活跃告警、全部指标平均值、严重级别计数、运行状态 |
 | `GET /api/nodes` | 节点列表（含在线状态与最近快照） |
-| `GET /api/nodes/<id>` | 单节点详情：最近 30 分钟原始读数 + 最近告警 |
+| `GET /api/nodes/<id>` | 单节点详情：实时窗口内的原始读数 + 最近告警 |
 | `PUT /api/nodes/<id>` | 修改节点 `name` / `room` |
 | `DELETE /api/nodes/<id>?purge=0\|1` | 删除节点；`purge=0` 保留历史读数并关闭其活跃告警，`purge=1` 连同该节点读数与告警一起删除 |
+| `GET /api/live?device_id=&minutes=` | 实时趋势原始读数；`minutes` 缺省取设置里的实时窗口（默认 25，范围 5–120） |
 | `GET /api/readings?range=24h&device_id=&bucket=` | 历史聚合曲线，range 取 30m / 1h / 6h / 24h / 7d / 30d |
-| `GET /api/alerts?state=active&limit=300` | 告警列表，state 取 active / open / acknowledged / resolved / all |
-| `POST /api/alerts/<id>/ack` | 确认单条告警 |
+| `GET /api/alerts?state=active&limit=300` | 告警列表，state 取 active（未处理 + 已确认 + 已静默）/ open / acknowledged / muted / resolved / all |
+| `POST /api/alerts/<id>/ack` | 确认单条告警，可选 `{"note": "..."}` |
+| `POST /api/alerts/<id>/mute` | 静默单条告警：`{"minutes": 60, "note": "..."}`，范围 5–1440 分钟 |
+| `POST /api/alerts/<id>/resolve` | 手动关闭本次告警，可选 `{"note": "..."}` |
 | `POST /api/alerts/ack` | 确认全部未处理告警 |
 | `GET /api/logs?levels=INFO,WARN&limit=500&since_id=` | 服务日志 |
 | `GET /api/settings` / `PUT /api/settings` | 阈值与运行参数 |
 | `POST /api/device-key/regenerate` | 重新生成节点密钥（旧密钥立即失效） |
 | `GET /api/stream?token=` | SSE 实时流 |
+| `GET /manifest.webmanifest` | PWA 清单 |
+| `GET /sw.js` | PWA Service Worker（响应头允许根作用域） |
 
 登录失败按来源限速（5 分钟内 10 次），账号不存在与密码错误返回相同提示。
+
+告警处理返回完整的告警对象。已恢复的告警再次处理会返回 `409`；确认 / 静默 / 关闭都会记录
+操作人（当前登录账号）与备注，备注最长 200 字。手动关闭只结束本次告警，如果越限持续，
+下一条读数仍会重新开一条新告警。
+
+### 多指标告警
+
+`settings.alerts` 中每个指标独立配置，缺省值见 `roomsense/config.py`：
+
+| 指标 | 触发方向 | 默认警告 | 默认严重 | 回差 |
+| --- | --- | --- | --- | --- |
+| temperature | 上限 / 下限 | 28 / 18 °C | 32 / 12 °C | 0.5 |
+| humidity | 上限 / 下限 | 70 / 30 %RH | 85 / 20 %RH | 2 |
+| co2 | 上限 | 1000 ppm | 1500 ppm | 50 |
+| pm25 | 上限 | 75 µg/m³ | 150 µg/m³ | 10 |
+| noise | 上限 | 70 dB | 85 dB | 5 |
+| light | 下限 | 80 lx | 30 lx | 15 |
+| battery | 下限 | 3.5 V | 3.3 V | 0.05 |
+
+只有上报了对应字段的读数才会参与判定；没有接传感器时不会误报。
+
+### 运行时设置
+
+`PUT /api/settings` 支持部分更新，未出现的字段保持不变：
+
+```json
+{
+  "offline_timeout": 90,
+  "retention_days": 30,
+  "live_window_minutes": 25,
+  "public_url": "https://panel.example.com",
+  "alerts": {
+    "temperature": {"low": 18, "high": 28, "critical_low": 12, "critical_high": 32},
+    "humidity": {"low": 30, "high": 70, "critical_low": 20, "critical_high": 85},
+    "co2": {"high": 1000, "critical_high": 1500},
+    "pm25": {"high": 75, "critical_high": 150},
+    "noise": {"high": 70, "critical_high": 85},
+    "light": {"low": 80, "critical_low": 30},
+    "battery": {"low": 3.5, "critical_low": 3.3}
+  }
+}
+```
+
+`live_window_minutes` 范围 5–120；`offline_timeout` 15–3600 秒；`retention_days` 1–365 天。
+阈值超出物理范围、下限不小于上限或严重阈值越过普通阈值时返回 400。
 
 ### SSE 事件
 
 | 事件 | 载荷 |
 | --- | --- |
 | `hello` | 服务状态（版本、运行时长、模拟器开关、统计） |
-| `reading` | 一条新读数：`device_id / ts / temperature / humidity / co2 / battery / rssi` |
-| `alert` | 新建、刷新或恢复的告警对象（`state` 为 `open` / `acknowledged` / `resolved`） |
+| `reading` | 一条新读数：`device_id / ts / temperature / humidity / co2 / pm25 / noise / light / battery / rssi` |
+| `alert` | 新建、刷新、静默、恢复的告警对象（`state` 为 `open` / `acknowledged` / `muted` / `resolved`，含 `acknowledged_by`、`acknowledged_at`、`muted_until`、`resolved_by`、`note`） |
 | `node` | 节点上线、离线或信息变更 |
 | `node_deleted` | 节点被删除（含 `purged`、删除/保留的记录数），前端据此移除该节点 |
 | `log` | 一条日志：`ts / level / source / message` |
 | `settings` | 设置被修改后的完整设置对象 |
 | `device_key` | 节点密钥被轮换 |
 
-连接断开时浏览器会自动重连；服务端每 15 秒发送一次注释心跳。
+连接断开时浏览器会自动重连；服务端每 15 秒发送一次注释心跳。告警静默到期由服务端维护任务
+自动把状态改回 `open`，并通过 `alert` 事件通知所有面板。
 
 ### 跨域（前后端分离部署）
 
@@ -204,12 +255,13 @@ client.loop_start()
 
 ## 3. 账号与安全边界
 
-- 面板使用账号密码登录：`conf/accounts.json` 只保存 PBKDF2-HMAC-SHA256
-  （随机盐、240000 次迭代）派生结果，不保存明文；
+- 面板使用账号密码登录：`conf/accounts.json` **按项目约定保存明文口令**，便于查看与找回；
+  能读到该文件的人即可拿到全部口令，请保持文件 0600 权限、不要提交或发给别人；
+  历史版本的 PBKDF2 摘要仍可登录，登录成功后自动迁移为明文；
 - 首次启动生成随机初始密码并打印一次到终端；`python main.py --reset-password [账号]`
   可随时重置为新的随机密码；
 - 登录后使用内存会话令牌（默认 12 小时有效，服务重启即失效），刷新页面自动恢复登录；
 - 节点密钥与面板账号完全独立，可在“设置 → 设备接入”轮换；两者都不要写进前端代码、
   URL 或日志；
 - 当前默认明文 HTTP，仅适合局域网；公网部署需在前端加 HTTPS 反向代理，并把
-  `server.host` 保持为内网地址。
+  `server.host` 保持为内网地址。PWA 安装与 Service Worker 同样要求 HTTPS 或 localhost。

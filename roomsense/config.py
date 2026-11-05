@@ -36,7 +36,9 @@ BUNDLE_DIR = Path(getattr(sys, '_MEIPASS', BASE_DIR)).resolve()
 
 DEFAULT_CONFIG: dict[str, Any] = {
     'server': {
-        'host': '127.0.0.1',
+        # 打包后的 exe 面向“双击即用”：默认监听所有网卡，首次运行释放的配置也用它；
+        # 源码运行仍只监听本机，避免开发机无意中把面板暴露到局域网。
+        'host': '0.0.0.0' if is_frozen() else '127.0.0.1',
         'port': 20500,
         # 对外访问地址，留空表示按监听地址或本机网卡推断。
         'public_url': '',
@@ -48,7 +50,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     'storage': {
         'db_path': './data/roomsense.db',
         'retention_days': 30,
-        'live_window_minutes': 30,
+        'live_window_minutes': 25,
+    },
+    'logging': {
+        'console_level': 'INFO',
     },
     'web': {
         'static_dir': './web',
@@ -77,6 +82,26 @@ DEFAULT_CONFIG: dict[str, Any] = {
             'high': 1000.0,
             'critical_high': 1500.0,
             'hysteresis': 50.0,
+        },
+        'pm25': {
+            'high': 75.0,
+            'critical_high': 150.0,
+            'hysteresis': 10.0,
+        },
+        'noise': {
+            'high': 70.0,
+            'critical_high': 85.0,
+            'hysteresis': 5.0,
+        },
+        'light': {
+            'low': 80.0,
+            'critical_low': 30.0,
+            'hysteresis': 15.0,
+        },
+        'battery': {
+            'low': 3.5,
+            'critical_low': 3.3,
+            'hysteresis': 0.05,
         },
     },
     'simulator': {
@@ -157,6 +182,9 @@ def load_config(config_path: str | os.PathLike[str] | None = None) -> dict[str, 
         config['simulator']['enable'] = False
     elif simulate in {'1', 'true', 'on', 'yes'}:
         config['simulator']['enable'] = True
+    log_level = os.environ.get('ROOMSENSE_LOG_LEVEL', '').strip().upper()
+    if log_level:
+        config['logging']['console_level'] = log_level
 
     config['server']['accounts_path'] = str(resolve_path(config['server']['accounts_path']))
     config['storage']['db_path'] = str(resolve_path(config['storage']['db_path']))

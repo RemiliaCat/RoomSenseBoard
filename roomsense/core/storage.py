@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 LOG_LEVELS = ('TRACE', 'DEBUG', 'NOTE', 'INFO', 'WARN', 'ERROR', 'FATAL')
+LOG_SEVERITY = {level: index for index, level in enumerate(LOG_LEVELS)}
 
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS nodes (
@@ -74,7 +75,12 @@ CREATE TABLE IF NOT EXISTS alerts (
     opened_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     state TEXT NOT NULL DEFAULT 'open',
-    resolved_at INTEGER
+    resolved_at INTEGER,
+    acknowledged_at INTEGER,
+    acknowledged_by TEXT,
+    resolved_by TEXT,
+    muted_until INTEGER,
+    note TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_alerts_device_kind ON alerts (device_id, kind, state);
 CREATE INDEX IF NOT EXISTS idx_alerts_state ON alerts (state, opened_at);
@@ -102,6 +108,15 @@ def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row) if row is not None else None
 
 
+def _merge_settings(base: dict[str, Any], patch: dict[str, Any]) -> None:
+    '''递归合并，保证旧数据库里没有的新告警指标仍能取到默认值。'''
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _merge_settings(base[key], value)
+        else:
+            base[key] = value
+
+
 class Storage:
     def __init__(self, db_path: str | os.PathLike[str]) -> None:
         self.path = Path(db_path)
@@ -109,6 +124,7 @@ class Storage:
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False, timeout=15)
         self._conn.row_factory = sqlite3.Row
+        self.console_level: str | None = None
         with self._lock:
             self._conn.execute('PRAGMA journal_mode=WAL')
             self._conn.execute('PRAGMA synchronous=NORMAL')
@@ -121,6 +137,13 @@ class Storage:
         additions = {
             'readings': (('pm25', 'REAL'), ('noise', 'REAL')),
             'nodes': (('last_pm25', 'REAL'), ('last_noise', 'REAL')),
+            'alerts': (
+                ('acknowledged_at', 'INTEGER'),
+                ('acknowledged_by', 'TEXT'),
+                ('resolved_by', 'TEXT'),
+                ('muted_until', 'INTEGER'),
+                ('note', 'TEXT'),
+            ),
         }
         for table, columns in additions.items():
             existing = {row['name'] for row in self._conn.execute(f'PRAGMA table_info({table})')}
@@ -131,6 +154,21 @@ class Storage:
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+    def set_console_level(self, level: str | None) -> None:
+        '''把不低于该级别的日志同步到终端；None / OFF 关闭。'''
+        normalized = str(level or '').strip().upper()
+        self.console_level = normalized if normalized in LOG_LEVELS else None
+
+    def _console(self, entry: dict[str, Any]) -> None:
+        threshold = LOG_SEVERITY.get(self.console_level or '', len(LOG_LEVELS))
+        if LOG_SEVERITY[entry['level']] < threshold:
+            return
+        stamp = time.strftime('%H:%M:%S', time.localtime(int(entry['ts'])))
+        try:
+            print(f"[{stamp}] {entry['level']:<5} {entry['source']}: {entry['message']}", flush=True)
+        except (OSError, ValueError):
+            self.console_level = None
 
     def _query(self, sql: str, params: Sequence[Any] = ()) -> list[dict[str, Any]]:
         with self._lock:
@@ -293,8 +331,8 @@ class Storage:
         readings = self._query_one('SELECT COUNT(*) AS total FROM readings WHERE device_id = ?', (device_id,))
         alerts = self._query_one('SELECT COUNT(*) AS total FROM alerts WHERE device_id = ?', (device_id,))
         active = self._query_one(
-            "SELECT COUNT(*) AS total FROM alerts WHERE device_id = ? AND state IN ('open', 'acknowledged')",
-            (device_id,),
+            'SELECT COUNT(*) AS total FROM alerts WHERE device_id = ? AND state IN (?, ?, ?)',
+            (device_id, *self.ACTIVE_STATES),
         )
         return {
             'readings': int((readings or {}).get('total') or 0),
@@ -319,10 +357,11 @@ class Storage:
                 self._conn.execute(
                     '''
                     UPDATE alerts SET state = 'resolved', resolved_at = ?, updated_at = ?,
+                                      resolved_by = 'system',
                                       message = '节点已从系统移除，告警关闭'
-                    WHERE device_id = ? AND state IN ('open', 'acknowledged')
+                    WHERE device_id = ? AND state IN (?, ?, ?)
                     ''',
-                    (now, now, device_id),
+                    (now, now, device_id, *self.ACTIVE_STATES),
                 )
             self._conn.execute('DELETE FROM nodes WHERE device_id = ?', (device_id,))
             self._conn.commit()
@@ -343,17 +382,19 @@ class Storage:
         device_id: str | None = None,
         limit: int = 5000,
     ) -> list[dict[str, Any]]:
+        '''按时间升序返回窗口内读数；超过上限时保留最新的 N 条。'''
         sql = '''
-            SELECT device_id, ts, temperature, humidity, co2, pm25, noise, light, battery, rssi
-            FROM readings
-            WHERE ts >= ? AND ts <= ?
+            SELECT * FROM (
+                SELECT device_id, ts, temperature, humidity, co2, pm25, noise, light, battery, rssi
+                FROM readings
+                WHERE ts >= ? AND ts <= ?
         '''
         params: list[Any] = [start, end]
         if device_id:
             sql += ' AND device_id = ?'
             params.append(device_id)
-        sql += ' ORDER BY ts ASC LIMIT ?'
-        params.append(max(1, limit))
+        sql += ' ORDER BY ts DESC LIMIT ?) ORDER BY ts ASC'
+        params.append(max(1, int(limit)))
         return self._query(sql, params)
 
     def readings_bucketed(
@@ -396,22 +437,22 @@ class Storage:
                     row[key] = round(float(row[key]), 2)
         return rows
 
-    ACTIVE_STATES = ('open', 'acknowledged')
+    ACTIVE_STATES = ('open', 'acknowledged', 'muted')
 
     def active_alert(self, device_id: str, kind: str) -> dict[str, Any] | None:
         return self._query_one(
             '''
             SELECT * FROM alerts
-            WHERE device_id = ? AND kind = ? AND state IN ('open', 'acknowledged')
+            WHERE device_id = ? AND kind = ? AND state IN (?, ?, ?)
             ORDER BY opened_at DESC LIMIT 1
             ''',
-            (device_id, kind),
+            (device_id, kind, *self.ACTIVE_STATES),
         )
 
     def active_alert_kinds(self, device_id: str) -> set[str]:
         rows = self._query(
-            "SELECT kind FROM alerts WHERE device_id = ? AND state IN ('open', 'acknowledged')",
-            (device_id,),
+            'SELECT kind FROM alerts WHERE device_id = ? AND state IN (?, ?, ?)',
+            (device_id, *self.ACTIVE_STATES),
         )
         return {row['kind'] for row in rows}
 
@@ -425,7 +466,7 @@ class Storage:
         threshold: float | None,
         ts: int | None = None,
     ) -> dict[str, Any]:
-        '''新建或更新一条活跃告警，返回最新记录。'''
+        '''新建或刷新一条活跃告警；已确认 / 已静默的状态保持不变。'''
         now = int(ts if ts is not None else time.time())
         active = self.active_alert(device_id, kind)
         if active is None:
@@ -451,30 +492,114 @@ class Storage:
         return self.get_alert(alert_id)  # type: ignore[return-value]
 
     def resolve_alert(self, device_id: str, kind: str, message: str, ts: int | None = None) -> dict[str, Any] | None:
+        '''指标恢复正常：关闭该指标的活跃告警（含已确认与已静默）。'''
         active = self.active_alert(device_id, kind)
         if active is None:
             return None
         now = int(ts if ts is not None else time.time())
         self._execute(
-            "UPDATE alerts SET state = 'resolved', message = ?, resolved_at = ?, updated_at = ? WHERE id = ?",
+            '''
+            UPDATE alerts SET state = 'resolved', message = ?, resolved_at = ?, updated_at = ?,
+                              muted_until = NULL
+            WHERE id = ?
+            ''',
             (message, now, now, active['id']),
         )
         return self.get_alert(int(active['id']))
 
-    def acknowledge_alert(self, alert_id: int) -> dict[str, Any] | None:
+    def acknowledge_alert(
+        self,
+        alert_id: int,
+        username: str = '',
+        note: str | None = None,
+    ) -> dict[str, Any] | None:
+        '''确认告警：记录处理人与备注，不再计入未处理角标。'''
+        now = int(time.time())
         self._execute(
             '''
-            UPDATE alerts SET state = 'acknowledged', updated_at = ?
-            WHERE id = ? AND state = 'open'
+            UPDATE alerts SET state = 'acknowledged', updated_at = ?, muted_until = NULL,
+                              acknowledged_at = COALESCE(acknowledged_at, ?),
+                              acknowledged_by = CASE WHEN acknowledged_by IS NULL OR acknowledged_by = ''
+                                                     THEN ? ELSE acknowledged_by END,
+                              note = COALESCE(NULLIF(?, ''), note)
+            WHERE id = ? AND state IN (?, ?, ?)
             ''',
-            (int(time.time()), alert_id),
+            (now, now, username, note or '', alert_id, *self.ACTIVE_STATES),
         )
         return self.get_alert(alert_id)
 
-    def acknowledge_all(self) -> int:
+    def mute_alert(
+        self,
+        alert_id: int,
+        minutes: int,
+        username: str = '',
+        note: str | None = None,
+    ) -> dict[str, Any] | None:
+        '''静默告警：到期前不进入未处理统计，但继续接收数值刷新。'''
+        now = int(time.time())
+        until = now + max(1, int(minutes)) * 60
+        self._execute(
+            '''
+            UPDATE alerts SET state = 'muted', muted_until = ?, updated_at = ?,
+                              acknowledged_at = COALESCE(acknowledged_at, ?),
+                              acknowledged_by = CASE WHEN acknowledged_by IS NULL OR acknowledged_by = ''
+                                                     THEN ? ELSE acknowledged_by END,
+                              note = COALESCE(NULLIF(?, ''), note)
+            WHERE id = ? AND state IN (?, ?, ?)
+            ''',
+            (until, now, now, username, note or '', alert_id, *self.ACTIVE_STATES),
+        )
+        return self.get_alert(alert_id)
+
+    def expire_mutes(self, now: int | None = None) -> list[dict[str, Any]]:
+        '''静默到期后恢复为未处理。'''
+        current = int(now if now is not None else time.time())
+        rows = self._query(
+            "SELECT id FROM alerts WHERE state = 'muted' AND muted_until IS NOT NULL AND muted_until <= ?",
+            (current,),
+        )
+        if not rows:
+            return []
+        self._execute(
+            "UPDATE alerts SET state = 'open', muted_until = NULL, updated_at = ? "
+            "WHERE state = 'muted' AND muted_until IS NOT NULL AND muted_until <= ?",
+            (current, current),
+        )
+        return [
+            alert
+            for alert in (self.get_alert(int(row['id'])) for row in rows)
+            if alert and alert['state'] == 'open'
+        ]
+
+    def resolve_alert_manual(
+        self,
+        alert_id: int,
+        username: str = '',
+        note: str | None = None,
+    ) -> dict[str, Any] | None:
+        '''人工关闭本次告警；若越限持续，下一条读数会重新开一条新告警。'''
+        now = int(time.time())
+        self._execute(
+            '''
+            UPDATE alerts SET state = 'resolved', resolved_at = ?, resolved_by = ?, updated_at = ?,
+                              muted_until = NULL, note = COALESCE(NULLIF(?, ''), note)
+            WHERE id = ? AND state IN (?, ?, ?)
+            ''',
+            (now, username, now, note or '', alert_id, *self.ACTIVE_STATES),
+        )
+        return self.get_alert(alert_id)
+
+    def acknowledge_all(self, username: str = '') -> int:
+        now = int(time.time())
         cursor = self._execute(
-            "UPDATE alerts SET state = 'acknowledged', updated_at = ? WHERE state = 'open'",
-            (int(time.time()),),
+            '''
+            UPDATE alerts SET state = 'acknowledged', updated_at = ?,
+                              acknowledged_at = COALESCE(acknowledged_at, ?),
+                              acknowledged_by = CASE WHEN acknowledged_by IS NULL OR acknowledged_by = ''
+                                                     THEN ? ELSE acknowledged_by END
+            WHERE state = 'open'
+            ''',
+            (now, now, username),
         )
         return int(cursor.rowcount or 0)
 
@@ -505,7 +630,8 @@ class Storage:
             ORDER BY CASE alerts.state
                          WHEN 'open' THEN 0
                          WHEN 'acknowledged' THEN 1
-                         ELSE 2
+                         WHEN 'muted' THEN 2
+                         ELSE 3
                      END,
                      alerts.opened_at DESC
             LIMIT ?
@@ -515,10 +641,20 @@ class Storage:
 
     def alert_counts(self) -> dict[str, int]:
         rows = self._query('SELECT state, COUNT(*) AS total FROM alerts GROUP BY state')
-        counts = {'open': 0, 'acknowledged': 0, 'resolved': 0}
+        counts = {'open': 0, 'acknowledged': 0, 'muted': 0, 'resolved': 0}
         for row in rows:
             counts[str(row['state'])] = int(row['total'])
-        counts['active'] = counts['open'] + counts['acknowledged']
+        counts['active'] = counts['open'] + counts['acknowledged'] + counts['muted']
+        return counts
+
+    def alert_severity_counts(self) -> dict[str, int]:
+        rows = self._query(
+            'SELECT severity, COUNT(*) AS total FROM alerts WHERE state IN (?, ?, ?) GROUP BY severity',
+            self.ACTIVE_STATES,
+        )
+        counts = {'warning': 0, 'critical': 0}
+        for row in rows:
+            counts[str(row['severity'])] = int(row['total'])
         return counts
 
     def add_log(self, level: str, source: str, message: str, ts: int | None = None) -> dict[str, Any]:
@@ -530,13 +666,16 @@ class Storage:
             'INSERT INTO logs (ts, level, source, message) VALUES (?, ?, ?, ?)',
             (now, level, source, message),
         )
-        return {
+        entry = {
             'id': int(cursor.lastrowid or 0),
             'ts': now,
             'level': level,
             'source': source,
             'message': message,
         }
+        if self.console_level:
+            self._console(entry)
+        return entry
 
     def list_logs(
         self,
@@ -579,11 +718,7 @@ class Storage:
             except json.JSONDecodeError:
                 stored = {}
         merged = json.loads(json.dumps(defaults))
-        for key, value in stored.items():
-            if isinstance(value, dict) and isinstance(merged.get(key), dict):
-                merged[key] = {**merged[key], **value}
-            else:
-                merged[key] = value
+        _merge_settings(merged, stored)
         return merged
 
     def save_runtime_settings(self, settings: dict[str, Any]) -> dict[str, Any]:

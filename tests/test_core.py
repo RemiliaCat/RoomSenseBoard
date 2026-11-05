@@ -16,6 +16,8 @@ r'''
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import sqlite3
 import tempfile
@@ -24,15 +26,16 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from roomsense import assets, netinfo
+from roomsense import __version__, assets, netinfo
 from roomsense.api.panel import PanelHTTPServer
 from roomsense.app import App
 from roomsense.config import DEFAULT_CONFIG, load_config, read_or_create_secret
 from roomsense.core.alerts import evaluate_reading
-from roomsense.core.auth import AccountStore, generate_password, hash_password, verify_password
+from roomsense.core.auth import AccountStore, generate_password, password_record, verify_password
 from roomsense.core.bus import EventBus
 from roomsense.core.gateway import DeviceGateway, ValidationError, default_runtime_settings, normalize_reading
 from roomsense.core.simulator import Simulator
@@ -45,6 +48,7 @@ def make_config(directory: Path, simulate: bool = False) -> dict:
     config['server']['accounts_path'] = str(directory / 'accounts.json')
     config['device']['key_path'] = str(directory / 'device_key.txt')
     config['simulator']['enable'] = simulate
+    config['logging']['console_level'] = 'ERROR'
     return config
 
 
@@ -178,6 +182,77 @@ class StorageTest(unittest.TestCase):
         self.assertEqual(self.storage.readings_between(0, now + 10, device_id='node-y'), [])
         self.assertEqual(self.storage.list_alerts(states=None), [])
 
+    def test_alert_lifecycle_records_operator_and_mute(self) -> None:
+        now = int(time.time())
+        alert = self.storage.open_alert('node-z', 'noise_high', 'warning', '噪声过高', 72.0, 70.0, ts=now)
+        alert_id = int(alert['id'])
+
+        acked = self.storage.acknowledge_alert(alert_id, 'admin', '已通知现场')
+        self.assertEqual(acked['state'], 'acknowledged')
+        self.assertEqual(acked['acknowledged_by'], 'admin')
+        self.assertEqual(acked['note'], '已通知现场')
+        self.assertEqual(self.storage.alert_counts()['open'], 0)
+        self.assertEqual(self.storage.alert_counts()['acknowledged'], 1)
+
+        muted = self.storage.mute_alert(alert_id, 30, 'admin', '')
+        self.assertEqual(muted['state'], 'muted')
+        self.assertGreaterEqual(int(muted['muted_until']), now + 30 * 60)
+        self.assertEqual(muted['acknowledged_by'], 'admin')
+        self.assertEqual(self.storage.alert_counts()['muted'], 1)
+        self.assertEqual(self.storage.alert_severity_counts()['warning'], 1)
+
+        expired = self.storage.expire_mutes(now + 3600)
+        self.assertEqual(len(expired), 1)
+        self.assertEqual(expired[0]['state'], 'open')
+        self.assertIsNone(expired[0]['muted_until'])
+
+        resolved = self.storage.resolve_alert_manual(alert_id, 'admin', '已处理完毕')
+        self.assertEqual(resolved['state'], 'resolved')
+        self.assertEqual(resolved['resolved_by'], 'admin')
+        self.assertEqual(resolved['note'], '已处理完毕')
+        self.assertEqual(self.storage.alert_counts()['active'], 0)
+
+    def test_legacy_alerts_table_gets_operator_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'legacy-alerts.db'
+            connection = sqlite3.connect(path)
+            connection.executescript(
+                '''
+                CREATE TABLE alerts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL, kind TEXT NOT NULL,
+                    severity TEXT NOT NULL, message TEXT NOT NULL, value REAL, threshold REAL,
+                    opened_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'open', resolved_at INTEGER
+                );
+                INSERT INTO alerts (device_id, kind, severity, message, opened_at, updated_at)
+                VALUES ('old-node', 'co2_high', 'warning', 'CO₂ 过高', 1, 1);
+                '''
+            )
+            connection.commit()
+            connection.close()
+
+            storage = Storage(path)
+            try:
+                alert = storage.get_alert(1)
+                self.assertIsNone(alert['acknowledged_by'])
+                changed = storage.acknowledge_alert(1, 'admin', '迁移后写入')
+                self.assertEqual(changed['state'], 'acknowledged')
+                self.assertEqual(changed['note'], '迁移后写入')
+            finally:
+                storage.close()
+
+    def test_console_log_level_filters_output(self) -> None:
+        self.storage.set_console_level('WARN')
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            self.storage.add_log('INFO', 'server', '不应打印的日志')
+            self.storage.add_log('WARN', 'alert', '需要打印的日志')
+        output = buffer.getvalue()
+        self.assertNotIn('不应打印的日志', output)
+        self.assertIn('WARN', output)
+        self.assertIn('需要打印的日志', output)
+        self.storage.set_console_level(None)
+
 
 class AlertRuleTest(unittest.TestCase):
     RULES = default_runtime_settings(json.loads(json.dumps(DEFAULT_CONFIG)))['alerts']
@@ -209,6 +284,39 @@ class AlertRuleTest(unittest.TestCase):
         kinds = [item['kind'] for item in results]
         self.assertEqual(kinds, ['co2_high'])
         self.assertEqual(results[0]['severity'], 'critical')
+
+    def test_new_metric_families_open_warning_alerts(self) -> None:
+        results = evaluate_reading(
+            {'pm25': 90.0, 'noise': 72.0, 'light': 50.0, 'battery': 3.4},
+            {'alerts': self.RULES},
+            set(),
+        )
+        by_kind = {item['kind']: item for item in results}
+        self.assertEqual(set(by_kind), {'pm25_high', 'noise_high', 'light_low', 'battery_low'})
+        self.assertTrue(all(item['severity'] == 'warning' for item in by_kind.values()))
+        self.assertIn('PM2.5', by_kind['pm25_high']['message'])
+        self.assertIn('低于下限', by_kind['light_low']['message'])
+
+    def test_new_metric_families_open_critical_alerts(self) -> None:
+        results = evaluate_reading(
+            {'pm25': 160.0, 'noise': 90.0, 'light': 20.0, 'battery': 3.2},
+            {'alerts': self.RULES},
+            set(),
+        )
+        by_kind = {item['kind']: item for item in results}
+        self.assertTrue(all(item['severity'] == 'critical' for item in by_kind.values()))
+
+    def test_new_metric_hysteresis_holds_and_recovers(self) -> None:
+        held = evaluate_reading({'pm25': 70.0}, {'alerts': self.RULES}, {'pm25_high'})
+        self.assertEqual([item['action'] for item in held], ['open'])
+        recovered = evaluate_reading({'pm25': 60.0}, {'alerts': self.RULES}, {'pm25_high'})
+        self.assertEqual([item['action'] for item in recovered], ['resolve'])
+
+    def test_light_and_battery_do_not_trigger_high_rules(self) -> None:
+        results = evaluate_reading(
+            {'light': 900.0, 'battery': 4.1}, {'alerts': self.RULES}, set()
+        )
+        self.assertEqual(results, [])
 
 
 class GatewayTest(unittest.TestCase):
@@ -272,6 +380,60 @@ class GatewayTest(unittest.TestCase):
         with self.assertRaises(ValidationError):
             self.gateway.update_settings({'public_url': 'ftp://panel.example.com'})
 
+    def test_settings_accept_new_metrics_and_live_window(self) -> None:
+        updated = self.gateway.update_settings(
+            {
+                'live_window_minutes': 40,
+                'alerts': {
+                    'pm25': {'high': 60.0},
+                    'noise': {'critical_high': 95.0},
+                    'light': {'low': 60.0},
+                    'battery': {'critical_low': 3.4},
+                },
+            }
+        )
+        self.assertEqual(updated['live_window_minutes'], 40)
+        self.assertEqual(updated['alerts']['pm25']['high'], 60.0)
+        self.assertEqual(updated['alerts']['pm25']['critical_high'], 150.0)
+        self.assertEqual(self.gateway.update_settings({'live_window_minutes': 1})['live_window_minutes'], 5)
+        self.assertEqual(self.gateway.update_settings({'live_window_minutes': 500})['live_window_minutes'], 120)
+        with self.assertRaises(ValidationError):
+            self.gateway.update_settings({'alerts': {'pm25': {'high': 5000.0}}})
+        with self.assertRaises(ValidationError):
+            self.gateway.update_settings({'alerts': {'light': {'critical_low': 200.0}}})
+
+    def test_overview_returns_all_metric_averages(self) -> None:
+        self.gateway.submit(
+            {
+                'device_id': 'overview-a',
+                'temperature': 20.0,
+                'humidity': 40.0,
+                'co2': 500.0,
+                'pm25': 10.0,
+                'noise': 40.0,
+                'light': 300.0,
+                'battery': 4.0,
+            }
+        )
+        self.gateway.submit(
+            {
+                'device_id': 'overview-b',
+                'temperature': 26.0,
+                'humidity': 60.0,
+                'co2': 900.0,
+                'pm25': 30.0,
+                'noise': 60.0,
+                'light': 500.0,
+                'battery': 3.8,
+            }
+        )
+        overview = self.gateway.overview()
+        self.assertAlmostEqual(overview['averages']['temperature'], 23.0)
+        self.assertAlmostEqual(overview['averages']['co2'], 700.0)
+        self.assertAlmostEqual(overview['averages']['pm25'], 20.0)
+        self.assertAlmostEqual(overview['averages']['battery'], 3.9)
+        self.assertIn('live_window_minutes', overview)
+
     def test_normalize_rejects_bad_values(self) -> None:
         with self.assertRaises(ValidationError):
             normalize_reading({'device_id': 'bad id', 'temperature': 20.0})
@@ -313,12 +475,44 @@ class AccountTest(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def test_password_hash_roundtrip(self) -> None:
-        record = hash_password('correct horse battery')
-        self.assertEqual(record['algorithm'], 'pbkdf2_sha256')
+    def test_password_is_stored_in_plaintext(self) -> None:
+        record = password_record('correct horse battery')
+        self.assertEqual(record['algorithm'], 'plain')
+        self.assertEqual(record['value'], 'correct horse battery')
         self.assertTrue(verify_password('correct horse battery', record))
         self.assertFalse(verify_password('wrong password', record))
-        self.assertNotIn('correct horse battery', json.dumps(record))
+
+    def test_account_file_contains_readable_password(self) -> None:
+        self.store.add_user('teacher', 'initial-pass')
+        raw = (Path(self._tmp.name) / 'accounts.json').read_text(encoding='utf-8')
+        self.assertIn('initial-pass', raw)
+        self.store.set_password('teacher', 'updated-pass')
+        raw = (Path(self._tmp.name) / 'accounts.json').read_text(encoding='utf-8')
+        self.assertIn('updated-pass', raw)
+        self.assertNotIn('initial-pass', raw)
+
+    def test_legacy_hash_record_still_verifies_and_is_migrated(self) -> None:
+        salt = b'legacy-salt-0000'
+        digest = hashlib.pbkdf2_hmac('sha256', b'old-pass', salt, 1000)
+        legacy = {
+            'algorithm': 'pbkdf2_sha256',
+            'iterations': 1000,
+            'salt': salt.hex(),
+            'hash': digest.hex(),
+        }
+        self.assertTrue(verify_password('old-pass', legacy))
+        self.assertFalse(verify_password('nope', legacy))
+
+        path = Path(self._tmp.name) / 'legacy.json'
+        path.write_text(
+            json.dumps({'version': 1, 'users': [{'username': 'old', 'password': legacy}]}),
+            encoding='utf-8',
+        )
+        store = AccountStore(path)
+        self.assertTrue(store.verify('old', 'old-pass'))
+        migrated = json.loads(path.read_text(encoding='utf-8'))['users'][0]['password']
+        self.assertEqual(migrated['algorithm'], 'plain')
+        self.assertEqual(migrated['value'], 'old-pass')
 
     def test_first_run_creates_account_with_generated_password(self) -> None:
         username, password = self.store.ensure_user('admin')
@@ -415,6 +609,10 @@ class SimulatorTest(unittest.TestCase):
 
 
 class ConfigTest(unittest.TestCase):
+    def test_default_live_window_is_25_minutes(self) -> None:
+        self.assertEqual(DEFAULT_CONFIG['storage']['live_window_minutes'], 25)
+        self.assertEqual(default_runtime_settings(json.loads(json.dumps(DEFAULT_CONFIG)))['live_window_minutes'], 25)
+
     def test_secret_file_is_created_once(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'nested' / 'device_key.txt'
@@ -563,6 +761,86 @@ class HttpApiTest(unittest.TestCase):
         self.assertEqual(payload['range'], '1h')
         self.assertIn('series', payload)
 
+    def test_live_endpoint_returns_raw_window(self) -> None:
+        headers = self.login()
+        device_key = Path(self.app.config['device']['key_path']).read_text(encoding='utf-8').strip()
+        now = int(time.time())
+        status, _ = self.call(
+            '/api/ingest',
+            'POST',
+            {'device_id': 'live-node', 'ts': now, 'temperature': 22.0, 'humidity': 45.0},
+            {'X-Device-Key': device_key},
+        )
+        self.assertEqual(status, 200)
+        status, payload = self.call('/api/live?device_id=live-node&minutes=20', headers=headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload['device_id'], 'live-node')
+        self.assertEqual(payload['minutes'], 20)
+        self.assertGreaterEqual(payload['end'], now)
+        self.assertTrue(payload['readings'])
+        self.assertEqual(self.call('/api/live', headers=headers)[0], 400)
+        # 实时窗口写入设置后立即生效。
+        status, settings = self.call(
+            '/api/settings', 'PUT', {'live_window_minutes': 35}, headers
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(settings['settings']['live_window_minutes'], 35)
+        self.call('/api/settings', 'PUT', {'live_window_minutes': 25}, headers)
+
+    def test_alert_actions_record_operator_and_state(self) -> None:
+        headers = self.login()
+        device_key = Path(self.app.config['device']['key_path']).read_text(encoding='utf-8').strip()
+        status, payload = self.call(
+            '/api/ingest',
+            'POST',
+            {'device_id': 'action-node', 'name': '操作测试', 'temperature': 35.0},
+            {'X-Device-Key': device_key},
+        )
+        self.assertEqual(status, 200)
+        alert_id = int(payload['opened'][0]['id'])
+
+        status, acked = self.call(
+            '/api/alerts/%d/ack' % alert_id, 'POST', {'note': '已通知现场'}, headers
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(acked['alert']['state'], 'acknowledged')
+        self.assertEqual(acked['alert']['acknowledged_by'], 'admin')
+        self.assertEqual(acked['alert']['note'], '已通知现场')
+
+        status, muted = self.call(
+            '/api/alerts/%d/mute' % alert_id, 'POST', {'minutes': 60, 'note': '暂时观察'}, headers
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(muted['alert']['state'], 'muted')
+        self.assertGreater(int(muted['alert']['muted_until']), int(time.time()))
+        self.assertEqual(muted['alert']['note'], '暂时观察')
+
+        status, resolved = self.call(
+            '/api/alerts/%d/resolve' % alert_id, 'POST', {'note': '已处理'}, headers
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(resolved['alert']['state'], 'resolved')
+        self.assertEqual(resolved['alert']['resolved_by'], 'admin')
+        self.assertEqual(resolved['alert']['note'], '已处理')
+
+        status, payload = self.call('/api/alerts/%d/ack' % alert_id, 'POST', {}, headers)
+        self.assertEqual(status, 409)
+
+    def test_pwa_manifest_and_service_worker_are_served(self) -> None:
+        status, manifest, headers = self.call('/manifest.webmanifest', with_headers=True)
+        self.assertEqual(status, 200)
+        self.assertIn('application/manifest+json', headers.get('Content-Type', ''))
+        sizes = {icon['sizes'] for icon in manifest['icons']}
+        self.assertIn('192x192', sizes)
+        self.assertIn('512x512', sizes)
+        with urllib.request.urlopen(f'http://127.0.0.1:{self.port}/sw.js', timeout=5) as response:
+            self.assertEqual(response.status, 200)
+            headers = dict(response.headers)
+            body = response.read().decode('utf-8')
+        self.assertEqual(headers.get('Service-Worker-Allowed'), '/')
+        self.assertIn('text/javascript', headers.get('Content-Type', ''))
+        self.assertIn('roomsense-', body)
+
     def test_stream_requires_session_and_pushes_reading(self) -> None:
         self.assertEqual(self.call('/api/stream')[0], 401)
         status, payload = self.call(
@@ -653,6 +931,11 @@ class HttpApiTest(unittest.TestCase):
         self.assertEqual(payload['settings']['public_url'], 'https://panel.example.com')
         status, payload = self.call('/api/settings', 'PUT', {'public_url': 'ftp://bad'}, headers)
         self.assertEqual(status, 400)
+        status, payload = self.call(
+            '/api/settings', 'PUT', {'public_url': 'http://0.0.0.0:20500'}, headers
+        )
+        self.assertEqual(status, 400)
+        self.assertIn('监听地址', payload['error'])
 
     def test_cors_preflight_only_allows_configured_origin(self) -> None:
         status, _, headers = self.call(
@@ -678,7 +961,14 @@ class NetinfoTest(unittest.TestCase):
             'https://panel.example.com/rsb',
         )
         self.assertEqual(netinfo.normalize_public_url('   '), '')
-        for bad in ('ftp://panel.example.com', 'http://panel.example.com/?a=1', 'http:///nohost'):
+        for bad in (
+            'ftp://panel.example.com',
+            'http://panel.example.com/?a=1',
+            'http:///nohost',
+            'http://0.0.0.0:20500',
+            'http://[::]:20500',
+            'http://*:20500',
+        ):
             with self.assertRaises(ValueError, msg=bad):
                 netinfo.normalize_public_url(bad)
 
@@ -697,6 +987,9 @@ class NetinfoTest(unittest.TestCase):
         self.assertEqual(endpoint.base_url, 'https://panel.example.com')
         self.assertEqual(endpoint.candidates, ('https://panel.example.com',))
         self.assertEqual(endpoint.source, 'configured')
+        loopback = netinfo.resolve_endpoint('https://panel.example.com', '127.0.0.1', 20500)
+        self.assertEqual(loopback.base_url, 'https://panel.example.com')
+        self.assertEqual(loopback.source, 'configured')
 
     def test_wildcard_host_detects_lan_addresses(self) -> None:
         with mock.patch.object(
@@ -715,6 +1008,53 @@ class NetinfoTest(unittest.TestCase):
         self.assertEqual(endpoint.base_url, 'http://127.0.0.1:20500')
         self.assertEqual(endpoint.source, 'listen')
 
+    def test_loopback_listen_never_advertises_public_address(self) -> None:
+        endpoint = netinfo.resolve_endpoint(
+            '',
+            '127.0.0.1',
+            20500,
+            public=netinfo.PublicAddress('134.175.137.13', 'tencent', True),
+        )
+        self.assertEqual(endpoint.base_url, 'http://127.0.0.1:20500')
+        self.assertEqual(endpoint.candidates, ('http://127.0.0.1:20500',))
+        self.assertEqual(endpoint.source, 'listen')
+
+    def test_local_base_url_uses_loopback_for_wildcard_and_loopback(self) -> None:
+        for host in ('0.0.0.0', '*', '', '127.0.0.1', 'localhost'):
+            with self.subTest(host=host):
+                self.assertEqual(netinfo.local_base_url(host, 20500), 'http://127.0.0.1:20500')
+        for host in ('::', '[::]', '::1', '[::1]'):
+            with self.subTest(host=host):
+                self.assertEqual(netinfo.local_base_url(host, 20500), 'http://[::1]:20500')
+        self.assertEqual(netinfo.local_base_url('192.168.1.20', 20500), 'http://192.168.1.20:20500')
+
+    def test_authoritative_public_address_wins_for_wildcard(self) -> None:
+        with mock.patch.object(netinfo, 'local_ipv4_addresses', return_value=['10.1.0.3']):
+            endpoint = netinfo.resolve_endpoint(
+                '',
+                '0.0.0.0',
+                20500,
+                public=netinfo.PublicAddress('134.175.137.13', 'tencent', True),
+            )
+        self.assertEqual(endpoint.base_url, 'http://134.175.137.13:20500')
+        self.assertEqual(endpoint.source, 'public')
+        self.assertEqual(
+            endpoint.candidates,
+            ('http://134.175.137.13:20500', 'http://10.1.0.3:20500'),
+        )
+
+    def test_echo_public_address_is_a_secondary_candidate(self) -> None:
+        with mock.patch.object(netinfo, 'local_ipv4_addresses', return_value=['192.168.1.20']):
+            endpoint = netinfo.resolve_endpoint(
+                '',
+                '0.0.0.0',
+                20500,
+                public=netinfo.PublicAddress('203.0.113.10', 'ipify', False),
+            )
+        self.assertEqual(endpoint.base_url, 'http://192.168.1.20:20500')
+        self.assertEqual(endpoint.source, 'lan')
+        self.assertIn('http://203.0.113.10:20500', endpoint.candidates)
+
     def test_loopback_when_no_address_is_found(self) -> None:
         with mock.patch.object(netinfo, 'local_ipv4_addresses', return_value=[]):
             endpoint = netinfo.resolve_endpoint('', '0.0.0.0', 20500)
@@ -725,6 +1065,22 @@ class NetinfoTest(unittest.TestCase):
         with mock.patch.object(netinfo, 'local_ipv4_addresses', return_value=[]):
             endpoint = netinfo.resolve_endpoint('ftp://panel.example.com', '0.0.0.0', 20500)
         self.assertEqual(endpoint.source, 'loopback')
+
+
+class PwaAssetTest(unittest.TestCase):
+    ROOT = Path(__file__).resolve().parent.parent
+
+    def test_service_worker_cache_matches_version(self) -> None:
+        text = (self.ROOT / 'web' / 'sw.js').read_text(encoding='utf-8')
+        self.assertIn(f'roomsense-{__version__}', text, '发版时请同步 web/sw.js 的 CACHE 常量')
+
+    def test_manifest_icons_exist(self) -> None:
+        manifest = json.loads((self.ROOT / 'web' / 'manifest.webmanifest').read_text(encoding='utf-8'))
+        self.assertEqual(manifest['start_url'], '/')
+        self.assertEqual(manifest['display'], 'standalone')
+        for icon in manifest['icons']:
+            relative = icon['src'].lstrip('/').replace('static/', '')
+            self.assertTrue((self.ROOT / 'web' / relative).is_file(), icon)
 
 
 class AssetsTest(unittest.TestCase):

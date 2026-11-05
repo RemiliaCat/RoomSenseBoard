@@ -28,6 +28,7 @@ from .core.bus import EventBus
 from .core.gateway import DeviceGateway, default_runtime_settings
 from .core.simulator import Simulator
 from .core.storage import Storage
+from .netinfo import normalize_public_url
 
 
 class Maintenance(threading.Thread):
@@ -46,8 +47,9 @@ class Maintenance(threading.Thread):
         while not self._stop_event.wait(self.interval):
             try:
                 self.app.gateway.check_offline()
+                self.app.expire_mutes()
             except Exception as error:
-                self.app.storage.add_log('ERROR', 'maintenance', f'离线检测失败：{error}')
+                self.app.storage.add_log('ERROR', 'maintenance', f'维护任务失败：{error}')
             if time.time() - last_prune >= self.prune_interval:
                 last_prune = time.time()
                 self.app.prune()
@@ -59,6 +61,7 @@ class App:
         self.version = __version__
         self.started_at = time.time()
         self.storage = Storage(config['storage']['db_path'])
+        self.storage.set_console_level((config.get('logging') or {}).get('console_level'))
         self.bus = EventBus()
 
         server = config['server']
@@ -73,6 +76,7 @@ class App:
 
         defaults = default_runtime_settings(config)
         self.settings: dict[str, Any] = self.storage.get_runtime_settings(defaults)
+        self._sanitize_public_url()
         self.gateway = DeviceGateway(self.storage, self.bus, lambda: dict(self.settings))
         self.ingest_api = DeviceIngestApi(self.gateway, self.device_key)
 
@@ -123,9 +127,20 @@ class App:
             raise ValueError(f'账号不存在：{target}')
         password = generate_password()
         self.accounts.set_password(target, password)
+        if not self.accounts.verify(target, password):
+            raise ValueError(f'密码写入后校验失败，请检查账号文件是否可写：{self.accounts.path}')
         self.sessions.revoke_user(target)
         self.storage.add_log('WARN', 'auth', f'账号 {target} 的密码已被重置')
         return target, password
+
+    def _sanitize_public_url(self) -> None:
+        '''旧版本可能把 0.0.0.0 存进设置；启动时清掉，避免继续展示无效地址。'''
+        raw = str(self.settings.get('public_url') or '')
+        try:
+            self.settings['public_url'] = normalize_public_url(raw)
+        except ValueError as error:
+            self.settings['public_url'] = ''
+            self.storage.add_log('WARN', 'settings', f'对外访问地址无效，已忽略：{error}')
 
     def runtime_settings(self) -> dict[str, Any]:
         return dict(self.settings)
@@ -143,6 +158,15 @@ class App:
         self.storage.add_log('WARN', 'settings', '节点接入密钥已重新生成，旧密钥立即失效')
         self.bus.publish('device_key', {'regenerated': True})
         return self.device_key
+
+    def expire_mutes(self) -> list[dict[str, Any]]:
+        expired = self.storage.expire_mutes()
+        for alert in expired:
+            self.bus.publish('alert', alert)
+            self.storage.add_log(
+                'NOTE', 'alert', f"告警 #{alert['id']} 静默结束，重新进入未处理"
+            )
+        return expired
 
     def prune(self) -> dict[str, int]:
         result = self.storage.prune(int(self.settings.get('retention_days', 30)))

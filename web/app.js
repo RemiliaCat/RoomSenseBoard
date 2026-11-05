@@ -28,14 +28,14 @@
   const METRICS = {
     temperature: { label: '温度', unit: '°C', digits: 1, cssVar: '--temp' },
     humidity: { label: '湿度', unit: '%RH', digits: 1, cssVar: '--humidity' },
-    co2: { label: 'CO₂', unit: ' ppm', digits: 0, cssVar: '--co2' },
-    pm25: { label: 'PM2.5', unit: ' µg/m³', digits: 0, cssVar: '--pm25' },
-    noise: { label: '噪声', unit: ' dB', digits: 0, cssVar: '--noise' },
-    light: { label: '光照', unit: ' lx', digits: 0, cssVar: '--light' },
+    co2: { label: 'CO₂', unit: 'ppm', digits: 0, cssVar: '--co2' },
+    pm25: { label: 'PM2.5', unit: 'µg/m³', digits: 0, cssVar: '--pm25' },
+    noise: { label: '噪声', unit: 'dB', digits: 0, cssVar: '--noise' },
+    light: { label: '光照', unit: 'lx', digits: 0, cssVar: '--light' },
+    battery: { label: '电量', unit: 'V', digits: 2, cssVar: '--battery' },
   };
-  const METRIC_ORDER = ['temperature', 'humidity', 'co2', 'pm25', 'noise', 'light'];
-  const LIVE_METRIC_LIMIT = 2;
-  const STATE_LABELS = { open: '未处理', acknowledged: '已确认', resolved: '已恢复' };
+  const METRIC_ORDER = ['temperature', 'humidity', 'co2', 'pm25', 'noise', 'light', 'battery'];
+  const STATE_LABELS = { open: '未处理', acknowledged: '已确认', muted: '已静默', resolved: '已恢复' };
   const SEVERITY_LABELS = { warning: '警告', critical: '严重' };
   const SOURCE_LABELS = {
     http: '设备',
@@ -65,22 +65,28 @@
     server: null,
     nodes: [],
     alerts: [],
-    alertCounts: { open: 0, acknowledged: 0, resolved: 0, active: 0 },
+    alertCounts: { open: 0, acknowledged: 0, muted: 0, resolved: 0, active: 0 },
+    severityCounts: { warning: 0, critical: 0 },
+    averages: {},
     liveNode: '',
     liveMetrics: ['temperature', 'humidity'],
+    liveWindow: 25,
     liveSeries: new Map(),
-    history: { series: [], metric: 'temperature', range: '24h' },
+    history: { series: [], metric: 'temperature', range: '24h', start: 0, end: 0, bucket: 60 },
     settings: null,
     device: null,
     nodeDetail: null,
+    alertAction: null,
     logs: [],
     logLevels: new Set(['INFO', 'WARN', 'ERROR', 'FATAL']),
     stream: null,
     streamErrors: 0,
     polls: null,
+    liveTicker: null,
     noticeTimer: null,
     alertsReload: null,
     charts: {},
+    liveCharts: new Map(),
   };
 
   function element(tag, text, attrs = {}) {
@@ -265,6 +271,8 @@
     stopStream();
     clearInterval(state.polls);
     state.polls = null;
+    clearInterval(state.liveTicker);
+    state.liveTicker = null;
     state.session = '';
     state.username = '';
     state.account = null;
@@ -273,6 +281,7 @@
     state.logs = [];
     state.liveSeries.clear();
     destroyCharts();
+    $('live-charts').replaceChildren();
     $('shell').hidden = true;
     $('login').hidden = false;
     $('loading').hidden = true;
@@ -286,7 +295,11 @@
     for (const chart of Object.values(state.charts)) {
       if (chart && typeof chart.destroy === 'function') chart.destroy();
     }
+    for (const entry of state.liveCharts.values()) {
+      if (entry.chart && typeof entry.chart.destroy === 'function') entry.chart.destroy();
+    }
     state.charts = {};
+    state.liveCharts.clear();
   }
 
   async function enterShell(loginResult = {}) {
@@ -304,6 +317,7 @@
     await navigate(restorePage());
     startStream();
     startPolling();
+    startLiveTicker();
   }
 
   async function boot() {
@@ -363,6 +377,35 @@
       if (state.page === 'dashboard') loadOverview().catch(notifyError);
       else api('/api/session', { method: 'POST' }).catch(() => {});
     }, 30000);
+  }
+
+  function updateWindowLabel() {
+    const node = $('live-window');
+    if (!node) return;
+    node.textContent = `窗口 ${state.liveWindow} 分钟`;
+    node.title = `曲线从首条数据开始逐秒撑开，累计满 ${state.liveWindow} 分钟后向右滑动`;
+  }
+
+  function growingDomain(points, end, windowSeconds) {
+    const first = points.length ? points[0].ts : null;
+    const start = Number.isFinite(first)
+      ? Math.max(end - windowSeconds, first)
+      : end - windowSeconds;
+    return [start, Math.max(end, start + 1)];
+  }
+
+  function liveDomain() {
+    const points = state.liveSeries.get(state.liveNode) || [];
+    return growingDomain(points, now(), state.liveWindow * 60);
+  }
+
+  function startLiveTicker() {
+    clearInterval(state.liveTicker);
+    state.liveTicker = setInterval(() => {
+      if (state.page !== 'dashboard' || document.hidden) return;
+      const [start, end] = liveDomain();
+      for (const entry of state.liveCharts.values()) entry.chart.setDomain(start, end);
+    }, 1000);
   }
 
   function startStream() {
@@ -450,7 +493,12 @@
       return;
     }
     if (type === 'settings') {
-      loadSettings().catch(() => {});
+      loadSettings()
+        .then(() => {
+          renderCards();
+          renderEnvironment();
+        })
+        .catch(() => {});
       return;
     }
     if (type === 'alerts_ack' || type === 'device_key') {
@@ -469,17 +517,19 @@
       pm25: reading.pm25,
       noise: reading.noise,
       light: reading.light,
+      battery: reading.battery,
     };
-    const last = list[list.length - 1];
-    if (last && last.ts === point.ts) list[list.length - 1] = point;
-    else list.push(point);
-    const cutoff = now() - 1800;
+    let index = list.length;
+    while (index > 0 && list[index - 1].ts > point.ts) index -= 1;
+    if (index > 0 && list[index - 1].ts === point.ts) list[index - 1] = point;
+    else list.splice(index, 0, point);
+    const cutoff = now() - state.liveWindow * 60 - 120;
     while (list.length && list[0].ts < cutoff) list.shift();
-    if (list.length > 1200) list.splice(0, list.length - 1200);
+    if (list.length > 3000) list.splice(0, list.length - 3000);
     state.liveSeries.set(reading.device_id, list);
 
     if (reading.device_id === state.liveNode) {
-      renderLiveChart();
+      updateLiveCharts();
       $('live-updated').textContent = `最新数据 ${formatTime(reading.ts, true)}`;
     }
 
@@ -487,19 +537,16 @@
     if (node) {
       node.last_seen = Math.max(node.last_seen || 0, reading.ts);
       node.online = true;
-      if (reading.temperature !== null && reading.temperature !== undefined) node.last_temperature = reading.temperature;
-      if (reading.humidity !== null && reading.humidity !== undefined) node.last_humidity = reading.humidity;
-      if (reading.co2 !== null && reading.co2 !== undefined) node.last_co2 = reading.co2;
-      if (reading.pm25 !== null && reading.pm25 !== undefined) node.last_pm25 = reading.pm25;
-      if (reading.noise !== null && reading.noise !== undefined) node.last_noise = reading.noise;
-      if (reading.light !== null && reading.light !== undefined) node.last_light = reading.light;
-      if (reading.rssi !== null && reading.rssi !== undefined) node.last_rssi = reading.rssi;
-      if (reading.battery !== null && reading.battery !== undefined) node.last_battery = reading.battery;
+      for (const field of ['temperature', 'humidity', 'co2', 'pm25', 'noise', 'light', 'rssi', 'battery']) {
+        if (reading[field] !== null && reading[field] !== undefined) node[`last_${field}`] = reading[field];
+      }
+      if (reading.battery !== undefined) node.last_battery = reading.battery;
     } else {
       loadNodes().catch(() => {});
     }
     if (state.page === 'dashboard') {
       renderCards();
+      renderEnvironment();
       renderDashboardNodes();
     }
     if (state.page === 'nodes') renderNodeTable();
@@ -514,6 +561,7 @@
     else state.nodes.push(merged);
     renderNodeOptions();
     renderCards();
+    renderEnvironment();
     renderDashboardNodes();
     if (state.page === 'nodes') renderNodeTable();
   }
@@ -525,8 +573,9 @@
     if (state.liveNode === deviceId) state.liveNode = state.nodes[0]?.device_id || '';
     renderNodeOptions();
     renderCards();
+    renderEnvironment();
     renderDashboardNodes();
-    renderLiveChart();
+    updateLiveCharts();
     if (state.page === 'nodes') renderNodeTable();
   }
 
@@ -552,94 +601,249 @@
     state.server = { ...(state.server || {}), ...(data.server || {}) };
     state.nodes = data.nodes || [];
     state.alertCounts = data.alert_counts || state.alertCounts;
+    state.severityCounts = data.severity_counts || state.severityCounts;
+    state.averages = data.averages || {};
+    if (data.settings && data.settings.live_window_minutes) {
+      applyLiveWindow(data.settings.live_window_minutes);
+    } else if (data.live_window_minutes) {
+      applyLiveWindow(data.live_window_minutes);
+    }
     if (!state.alerts.length || state.page === 'dashboard') {
       state.alerts = data.alerts || [];
     }
-  renderNodeOptions();
-  if (state.liveNode && !state.liveSeries.has(state.liveNode)) {
-    await loadLiveSeries(state.liveNode);
-  }
+    renderNodeOptions();
+    if (state.liveNode && !state.liveSeries.has(state.liveNode)) {
+      await loadLiveSeries(state.liveNode);
+    }
     renderCards();
+    renderEnvironment();
     renderDashboardNodes();
     renderRecentAlerts();
     renderRuntime();
+    ensureLiveCharts();
+    updateLiveCharts();
     $('nodes-updated').textContent = `更新于 ${formatTime(now())}`;
   }
 
+  function applyLiveWindow(minutes) {
+    const value = Math.max(5, Math.min(120, Number(minutes) || 25));
+    if (value === state.liveWindow) return;
+    state.liveWindow = value;
+    const cutoff = now() - value * 60 - 120;
+    for (const [deviceId, list] of state.liveSeries) {
+      const kept = list.filter((point) => point.ts >= cutoff);
+      state.liveSeries.set(deviceId, kept);
+    }
+    if (state.liveNode) loadLiveSeries(state.liveNode).catch(() => {});
+  }
+
   async function loadLiveSeries(deviceId) {
-    const data = await api(`/api/readings?range=30m&device_id=${encodeURIComponent(deviceId)}`);
-    const series = data.series?.[0];
+    const data = await api(
+      `/api/live?device_id=${encodeURIComponent(deviceId)}&minutes=${state.liveWindow}`,
+    );
     state.liveSeries.set(
       deviceId,
-    (series?.points || []).map((point) => ({
-      ts: point.ts,
-      temperature: point.temperature,
-      humidity: point.humidity,
-      co2: point.co2,
-      pm25: point.pm25,
-      noise: point.noise,
-      light: point.light,
-    })),
+      (data.readings || []).map((point) => ({
+        ts: point.ts,
+        temperature: point.temperature,
+        humidity: point.humidity,
+        co2: point.co2,
+        pm25: point.pm25,
+        noise: point.noise,
+        light: point.light,
+        battery: point.battery,
+      })),
     );
-    renderLiveChart();
+    updateLiveCharts();
+  }
+
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+
+  function svgNode(tag, attrs = {}) {
+    const node = document.createElementNS(SVG_NS, tag);
+    for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, String(value));
+    return node;
+  }
+
+  function clampRatio(value) {
+    if (!Number.isFinite(value)) return 0;
+    return Math.max(0, Math.min(1, value));
+  }
+
+  function ring({ segments = [], ratio = 0, color = 'var(--accent)', center = '--', unit = '' }) {
+    const wrapper = element('div', null, { class: 'ring' });
+    const svg = svgNode('svg', { viewBox: '0 0 100 100', 'aria-hidden': 'true' });
+    svg.append(svgNode('circle', { class: 'ring-track', cx: 50, cy: 50, r: 42, pathLength: 100 }));
+    const parts = (segments.length ? segments : [{ value: clampRatio(ratio) * 100, color }])
+      .filter((part) => Number.isFinite(part.value) && part.value > 0)
+      .map((part) => ({ value: Math.min(100, part.value), color: part.color || color }));
+    let offset = 0;
+    for (const part of parts) {
+      const circle = svgNode('circle', {
+        class: 'ring-seg',
+        cx: 50,
+        cy: 50,
+        r: 42,
+        pathLength: 100,
+        stroke: part.color,
+        'stroke-dasharray': `${part.value} 100`,
+        'stroke-dashoffset': -offset,
+      });
+      svg.append(circle);
+      offset += part.value;
+    }
+    wrapper.append(svg);
+    const centerNode = element('div', null, { class: 'ring-center' });
+    centerNode.append(element('strong', String(center)));
+    if (unit) centerNode.append(element('span', unit));
+    wrapper.append(centerNode);
+    return wrapper;
+  }
+
+  function averageOf(field) {
+    const values = state.nodes
+      .map((node) => node[`last_${field}`])
+      .filter((value) => Number.isFinite(value));
+    if (values.length) return values.reduce((sum, value) => sum + value, 0) / values.length;
+    const backend = state.averages ? state.averages[field] : null;
+    return Number.isFinite(backend) ? backend : null;
+  }
+
+  function comfortRatio(value, low, high) {
+    if (!Number.isFinite(value)) return 0;
+    return clampRatio((value - low) / (high - low));
+  }
+
+  function thresholdColor(value, rule, mode) {
+    if (!Number.isFinite(value) || !rule) return 'var(--muted)';
+    if (mode !== 'low' && rule.critical_high !== undefined && value >= Number(rule.critical_high)) {
+      return 'var(--danger)';
+    }
+    if (mode !== 'high' && rule.critical_low !== undefined && value <= Number(rule.critical_low)) {
+      return 'var(--danger)';
+    }
+    if (mode !== 'low' && rule.high !== undefined && value > Number(rule.high)) return 'var(--warn)';
+    if (mode !== 'high' && rule.low !== undefined && value < Number(rule.low)) return 'var(--warn)';
+    return 'var(--ok)';
+  }
+
+  function gaugeCard({ label, value, unit, ratio, color, note, segments }) {
+    const card = element('div', null, { class: 'panel card gauge-card' });
+    card.append(ring({ segments, ratio, color, center: value, unit }));
+    const body = element('div', null, { class: 'card-body' });
+    body.append(element('span', label, { class: 'card-label' }));
+    body.append(element('span', note, { class: 'card-note' }));
+    card.append(body);
+    return card;
   }
 
   function renderCards() {
+    const rules = state.settings?.alerts || {};
+    const total = state.nodes.length;
     const online = state.nodes.filter((node) => node.online).length;
-    const temperatures = state.nodes.map((node) => node.last_temperature).filter((value) => Number.isFinite(value));
-    const humidities = state.nodes.map((node) => node.last_humidity).filter((value) => Number.isFinite(value));
-    const average = (values) => (values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null);
     const open = state.alertCounts.open || 0;
-    const critical = state.alerts.filter((alert) => alert.severity === 'critical' && alert.state !== 'resolved').length;
+    const critical = state.severityCounts.critical || 0;
+    const warning = state.severityCounts.warning || 0;
+    const temperature = averageOf('temperature');
+    const humidity = averageOf('humidity');
+    const tempRule = rules.temperature || {};
+    const humidityRule = rules.humidity || {};
+    const tempColor = thresholdColor(temperature, tempRule, 'both');
+    const humidityColor = thresholdColor(humidity, humidityRule, 'both');
+    const severityTotal = critical + warning;
+    const segmentTotal = severityTotal || 1;
+
     const cards = [
-      {
+      gaugeCard({
         label: '在线节点',
-        value: `${online}/${state.nodes.length}`,
-        note: state.nodes.length ? '设备连接状态' : '等待节点接入',
-        className: online === state.nodes.length && online > 0 ? 'ok-text' : state.nodes.length ? 'warn-text' : '',
-      },
-      {
+        value: `${online}/${total}`,
+        unit: '台',
+        ratio: total ? online / total : 0,
+        color: total && online === total ? 'var(--ok)' : total ? 'var(--warn)' : 'var(--muted)',
+        note: total ? (online === total ? '全部在线' : `${total - online} 台离线`) : '等待节点接入',
+      }),
+      gaugeCard({
         label: '平均温度',
-        value: average(temperatures),
+        value: Number.isFinite(temperature) ? formatValue(temperature, 1) : '--',
         unit: '°C',
-        digits: 1,
-        note: '所有节点当前值',
-        className: 'metric-temp',
-      },
-      {
+        ratio: comfortRatio(temperature, Number(tempRule.low ?? 18), Number(tempRule.high ?? 28)),
+        color: tempColor === 'var(--ok)' ? 'var(--temp)' : tempColor,
+        note: `舒适 ${tempRule.low ?? 18}–${tempRule.high ?? 28} °C`,
+      }),
+      gaugeCard({
         label: '平均湿度',
-        value: average(humidities),
+        value: Number.isFinite(humidity) ? formatValue(humidity, 1) : '--',
         unit: '%RH',
-        digits: 1,
-        note: '所有节点当前值',
-        className: 'metric-humidity',
-      },
-      {
+        ratio: comfortRatio(humidity, Number(humidityRule.low ?? 30), Number(humidityRule.high ?? 70)),
+        color: humidityColor === 'var(--ok)' ? 'var(--humidity)' : humidityColor,
+        note: `舒适 ${humidityRule.low ?? 30}–${humidityRule.high ?? 70} %RH`,
+      }),
+      gaugeCard({
         label: '未处理告警',
         value: String(open),
-        note: critical ? `其中 ${critical} 条严重` : '待确认数量',
-        className: open ? 'danger-text' : 'ok-text',
-      },
+        unit: '条',
+        segments: [
+          { value: (critical / segmentTotal) * 100, color: 'var(--danger)' },
+          { value: (warning / segmentTotal) * 100, color: 'var(--warn)' },
+        ],
+        color: open ? 'var(--danger)' : 'var(--ok)',
+        note: `${critical} 严重 · ${warning} 警告`,
+      }),
     ];
-    const container = $('status-cards');
-    container.replaceChildren();
-    for (const card of cards) {
-      const box = element('div', null, { class: 'panel card' });
-      box.append(element('span', card.label));
-      const strong = element('strong', null, { class: card.className || '' });
-      if (card.value === null || card.value === undefined || card.value === '') {
-        strong.append(document.createTextNode('--'));
-      } else if (card.unit) {
-        strong.append(document.createTextNode(formatValue(card.value, card.digits ?? 1)));
-        strong.append(element('small', card.unit));
-      } else {
-        strong.append(document.createTextNode(String(card.value)));
-      }
-      box.append(strong);
-      if (card.note) box.append(element('span', card.note));
-      container.append(box);
-    }
+    $('status-cards').replaceChildren(...cards);
     updateAlertBadge();
+    updateWindowLabel();
+  }
+
+  const ENV_METRICS = [
+    { field: 'co2', label: 'CO₂', unit: 'ppm', digits: 0, mode: 'high' },
+    { field: 'pm25', label: 'PM2.5', unit: 'µg/m³', digits: 0, mode: 'high' },
+    { field: 'noise', label: '噪声', unit: 'dB', digits: 0, mode: 'high' },
+    { field: 'light', label: '光照', unit: 'lx', digits: 0, mode: 'low' },
+  ];
+
+  function renderEnvironment() {
+    const container = $('environment-grid');
+    if (!container) return;
+    const rules = state.settings?.alerts || {};
+    const nodes = [];
+    for (const meta of ENV_METRICS) {
+      const value = averageOf(meta.field);
+      const rule = rules[meta.field] || {};
+      const color = thresholdColor(value, rule, meta.mode);
+      let ratio = 0;
+      if (Number.isFinite(value)) {
+        if (meta.mode === 'low') {
+          const target = Math.max(Number(rule.low ?? 80) * 3, 1);
+          ratio = clampRatio(value / target);
+        } else {
+          const target = Math.max(Number(rule.critical_high ?? rule.high ?? 100), 1);
+          ratio = clampRatio(value / target);
+        }
+      }
+      const gauge = element('div', null, { class: 'env-gauge' });
+      gauge.append(
+        ring({
+          ratio,
+          color,
+          center: Number.isFinite(value) ? formatValue(value, meta.digits) : '--',
+          unit: meta.unit,
+        }),
+      );
+      const text = element('div', null, { class: 'env-text' });
+      text.append(element('span', meta.label));
+      const limit = meta.mode === 'low' ? rule.low : rule.high;
+      text.append(
+        element(
+          'span',
+          Number.isFinite(limit) ? `${meta.mode === 'low' ? '下限' : '上限'} ${formatValue(limit, meta.digits)}` : '未配置',
+          { class: 'env-note' },
+        ),
+      );
+      gauge.append(text);
+      nodes.push(gauge);
+    }
+    container.replaceChildren(...nodes);
   }
 
   function updateAlertBadge() {
@@ -656,33 +860,45 @@
     body.replaceChildren();
     if (!state.nodes.length) {
       const row = element('tr');
-      row.append(element('td', '暂无节点数据，启动模拟器或让设备上报后显示', { class: 'empty', colspan: '7' }));
+      row.append(element('td', '暂无节点数据，启动模拟器或让设备上报后显示', { class: 'empty', colspan: '8' }));
       body.append(row);
       return;
     }
     for (const node of state.nodes) {
       const row = element('tr');
-      row.append(element('td', node.name || node.device_id));
-      row.append(element('td', node.room || '--'));
-      const status = element('td');
-      status.append(element('span', null, { class: `dot ${node.online ? 'online' : 'offline'}` }));
-      status.append(element('span', node.online ? '在线' : `离线 ${formatAge(now() - node.last_seen)}`, { class: 'status-text' }));
-      row.append(status);
-    row.append(element('td', formatValue(node.last_temperature, 1), { class: 'metric-temp num' }));
-    row.append(element('td', formatValue(node.last_humidity, 1), { class: 'metric-humidity num' }));
-    row.append(
-      element('td', node.last_co2 === null || node.last_co2 === undefined ? '--' : formatValue(node.last_co2, 0), {
-        class: 'metric-co2 num',
-      }),
-    );
-    row.append(element('td', `${formatAge(now() - node.last_seen)}前`, { class: 'num' }));
-      row.append(
-        (() => {
-          const cell = element('td');
-          cell.append(button('详情', () => openNodeDialog(node.device_id)));
-          return cell;
-        })(),
+      const nameCell = element('td', null, { 'data-label': '节点' });
+      nameCell.append(element('div', node.name || node.device_id));
+      nameCell.append(element('span', node.room || node.device_id, { class: 'hint' }));
+      row.append(nameCell);
+
+      const status = element('td', null, { 'data-label': '状态' });
+      const statusWrap = element('span', null, { class: 'status-inline' });
+      statusWrap.append(element('span', null, { class: `dot ${node.online ? 'online' : 'offline'}` }));
+      statusWrap.append(
+        element('span', node.online ? '在线' : `离线 ${formatAge(now() - node.last_seen)}`, {
+          class: 'status-text',
+        }),
       );
+      status.append(statusWrap);
+      row.append(status);
+      row.append(element('td', formatValue(node.last_temperature, 1), { class: 'metric-temp num', 'data-label': '温度' }));
+      row.append(element('td', formatValue(node.last_humidity, 1), { class: 'metric-humidity num', 'data-label': '湿度' }));
+      row.append(
+        element('td', node.last_co2 === null || node.last_co2 === undefined ? '--' : formatValue(node.last_co2, 0), {
+          class: 'metric-co2 num',
+          'data-label': 'CO₂',
+        }),
+      );
+      row.append(
+        element('td', node.last_pm25 === null || node.last_pm25 === undefined ? '--' : formatValue(node.last_pm25, 0), {
+          class: 'metric-pm25 num',
+          'data-label': 'PM2.5',
+        }),
+      );
+      row.append(element('td', `${formatAge(now() - node.last_seen)}前`, { class: 'num', 'data-label': '最后上报' }));
+      const actions = element('td', null, { 'data-label': '操作' });
+      actions.append(button('详情', () => openNodeDialog(node.device_id)));
+      row.append(actions);
       body.append(row);
     }
   }
@@ -703,11 +919,20 @@
     item.append(element('span', SEVERITY_LABELS[alert.severity] || alert.severity, { class: `severity ${alert.severity}` }));
     const body = element('div', null, { class: 'alert-body' });
     body.append(element('div', alert.message, { class: 'alert-message' }));
-    body.append(
-      element('span', `${alert.device_name || alert.device_id} · ${formatTime(alert.opened_at, true)} · ${STATE_LABELS[alert.state] || alert.state}`, {
-        class: 'alert-meta',
-      }),
-    );
+    const meta = [
+      alert.device_name || alert.device_id,
+      formatTime(alert.opened_at, true),
+      STATE_LABELS[alert.state] || alert.state,
+    ];
+    if (alert.state === 'muted' && alert.muted_until) meta.push(`至 ${formatTime(alert.muted_until, true)}`);
+    body.append(element('span', meta.join(' · '), { class: 'alert-meta' }));
+    if (alert.acknowledged_by) {
+      body.append(
+        element('span', `由 ${alert.acknowledged_by} 处理${alert.note ? `：${alert.note}` : ''}`, {
+          class: 'alert-meta',
+        }),
+      );
+    }
     item.append(body);
     return item;
   }
@@ -723,8 +948,10 @@
       ['节点总数', stats.nodes ?? state.nodes.length],
       ['累计读数', stats.readings ?? '--'],
       ['近一小时入库', stats.readings_last_hour ?? '--'],
-      ['数据文件', formatBytes(stats.db_bytes)],
+      ['活跃告警', `${state.alertCounts.active || 0}（未处理 ${state.alertCounts.open || 0}）`],
+      ['实时窗口', `${state.liveWindow} 分钟`],
       ['实时连接数', server.streams ?? '--'],
+      ['数据文件', formatBytes(stats.db_bytes)],
       ['数据模拟器', server.simulator ? '已开启' : '已关闭'],
     ];
     for (const [label, value] of rows) {
@@ -744,7 +971,11 @@
     if (!state.nodes.length) {
       select.append(element('option', '暂无节点', { value: '' }));
       select.disabled = true;
+      state.liveNode = '';
+      const historySelect = $('history-node');
+      historySelect.replaceChildren(element('option', '全部节点', { value: '' }));
       refreshDropdown(select);
+      refreshDropdown(historySelect);
       return;
     }
     select.disabled = false;
@@ -785,7 +1016,7 @@
         class: 'metric-chip',
         'data-metric': key,
         'aria-pressed': active ? 'true' : 'false',
-        title: `${METRICS[key].label}（${METRICS[key].unit.trim()}）`,
+        title: `${METRICS[key].label}（${METRICS[key].unit}）`,
       });
       chip.append(element('span', null, { class: 'swatch', style: `background:${metricColor(key)}` }));
       chip.append(document.createTextNode(METRICS[key].label));
@@ -802,44 +1033,98 @@
       }
       state.liveMetrics = state.liveMetrics.filter((item) => item !== key);
     } else {
-      if (state.liveMetrics.length >= LIVE_METRIC_LIMIT) {
-        notify(`最多同时对比 ${LIVE_METRIC_LIMIT} 个指标，请先取消一个`);
-        return;
-      }
-      state.liveMetrics = [...state.liveMetrics, key];
+      state.liveMetrics = METRIC_ORDER.filter((item) => state.liveMetrics.includes(item) || item === key);
     }
     renderMetricChips();
-    renderLiveChart();
+    ensureLiveCharts();
+    updateLiveCharts();
   }
 
-  function renderLiveChart() {
-    if (!state.charts.live) {
-      state.charts.live = new LineChart($('live-chart'), { emptyText: '等待节点上报数据…' });
+  function metricGuides(key) {
+    const rule = state.settings?.alerts?.[key] || {};
+    const color = metricColor(key);
+    const guides = [];
+    for (const field of ['high', 'low', 'critical_high', 'critical_low']) {
+      const value = Number(rule[field]);
+      if (Number.isFinite(value)) guides.push({ value, color });
     }
+    return guides;
+  }
+
+  function ensureLiveCharts() {
+    const container = $('live-charts');
+    if (!container) return;
+    const wanted = new Set(state.liveMetrics);
+    for (const [key, entry] of state.liveCharts) {
+      if (wanted.has(key)) continue;
+      entry.chart.destroy();
+      entry.cell.remove();
+      state.liveCharts.delete(key);
+    }
+    for (const key of METRIC_ORDER) {
+      if (!wanted.has(key)) continue;
+      let entry = state.liveCharts.get(key);
+      if (!entry) {
+        const cell = element('figure', null, { class: 'live-cell', 'data-metric': key });
+        const caption = element('figcaption');
+        const title = element('span', null, { class: 'live-title' });
+        title.append(element('span', null, { class: 'swatch', style: `background:${metricColor(key)}` }));
+        title.append(document.createTextNode(METRICS[key].label));
+        const value = element('span', '--', { class: 'live-value' });
+        caption.append(title, value);
+        const wrap = element('div', null, { class: 'chart-wrap live-chart-wrap' });
+        const canvas = element('canvas', null, {
+          role: 'img',
+          'aria-label': `${METRICS[key].label}实时曲线`,
+        });
+        wrap.append(canvas);
+        cell.append(caption, wrap);
+        entry = {
+          cell,
+          title,
+          value,
+          chart: new LineChart(canvas, { emptyText: `等待${METRICS[key].label}上报…` }),
+        };
+        state.liveCharts.set(key, entry);
+      }
+      container.append(entry.cell);
+    }
+    container.classList.toggle('single', state.liveMetrics.length === 1);
+  }
+
+  function updateLiveCharts() {
+    if (!state.liveCharts.size) ensureLiveCharts();
     const points = state.liveSeries.get(state.liveNode) || [];
-    // 两个指标分走左右轴，不同量纲也能同图对比。
-    const series = state.liveMetrics.map((key, index) => ({
-      key,
-      label: METRICS[key].label,
-      color: metricColor(key),
-      unit: METRICS[key].unit,
-      digits: METRICS[key].digits,
-      axis: index === 0 ? 0 : 1,
-      fill: index === 0,
-      points: points.filter((point) => Number.isFinite(point[key])).map((point) => [point.ts, point[key]]),
-    }));
-    state.charts.live.setSeries(series);
-    const legend = $('live-legend');
-    legend.replaceChildren();
-    series.forEach((item, index) => {
-      const entry = element('span');
-      entry.append(element('span', null, { class: 'swatch', style: `background:${item.color}` }));
-      entry.append(document.createTextNode(`${item.label}（${item.unit.trim()}，${index === 0 ? '左轴' : '右轴'}）`));
-      legend.append(entry);
-    });
-    if (series.length === 0) legend.append(element('span', '未选择指标'));
-    const lastPoint = points[points.length - 1];
-    $('live-updated').textContent = lastPoint ? `最新数据 ${formatTime(lastPoint.ts, true)}` : '暂无数据';
+    const [start, end] = liveDomain();
+    for (const [key, entry] of state.liveCharts) {
+      const meta = METRICS[key];
+      const seriesPoints = points
+        .filter((point) => Number.isFinite(point[key]))
+        .map((point) => [point.ts, point[key]]);
+      entry.chart.setDomain(start, end);
+      entry.chart.setGuides(metricGuides(key));
+      entry.chart.setSeries([
+        {
+          label: meta.label,
+          color: metricColor(key),
+          unit: ` ${meta.unit}`,
+          digits: meta.digits,
+          axis: 0,
+          fill: true,
+          maxGap: 120,
+          points: seriesPoints,
+        },
+      ]);
+      const latest = seriesPoints[seriesPoints.length - 1];
+      entry.value.replaceChildren();
+      entry.value.append(document.createTextNode(latest ? formatValue(latest[1], meta.digits) : '--'));
+      if (latest) entry.value.append(element('small', meta.unit));
+      const swatch = entry.title.querySelector('.swatch');
+      if (swatch) swatch.style.background = metricColor(key);
+    }
+    const last = points[points.length - 1];
+    $('live-updated').textContent = last ? `最新数据 ${formatTime(last.ts, true)}` : '暂无数据';
+    updateWindowLabel();
   }
 
   async function loadNodes() {
@@ -848,6 +1133,7 @@
     renderNodeOptions();
     renderNodeTable();
     renderCards();
+    renderEnvironment();
     renderDashboardNodes();
     $('nodes-note').textContent = `共 ${state.nodes.length} 个节点`;
   }
@@ -872,51 +1158,59 @@
     }
     for (const node of nodes) {
       const row = element('tr');
-      const nameCell = element('td');
+      const nameCell = element('td', null, { 'data-label': '节点' });
       nameCell.append(element('div', node.name || node.device_id));
       nameCell.append(element('span', node.device_id, { class: 'hint' }));
       row.append(nameCell);
-      row.append(element('td', node.room || '--'));
-      const status = element('td');
-      status.append(element('span', null, { class: `dot ${node.online ? 'online' : 'offline'}` }));
-      status.append(element('span', node.online ? '在线' : '离线', { class: 'status-text' }));
+      row.append(element('td', node.room || '--', { 'data-label': '位置' }));
+      const status = element('td', null, { 'data-label': '状态' });
+      const statusWrap = element('span', null, { class: 'status-inline' });
+      statusWrap.append(element('span', null, { class: `dot ${node.online ? 'online' : 'offline'}` }));
+      statusWrap.append(element('span', node.online ? '在线' : '离线', { class: 'status-text' }));
+      status.append(statusWrap);
       row.append(status);
-    row.append(element('td', formatValue(node.last_temperature, 1), { class: 'metric-temp num' }));
-    row.append(element('td', formatValue(node.last_humidity, 1), { class: 'metric-humidity num' }));
-    row.append(
-      element('td', node.last_co2 === null || node.last_co2 === undefined ? '--' : formatValue(node.last_co2, 0), {
-        class: 'metric-co2 num',
-      }),
-    );
-    row.append(
-      element('td', node.last_pm25 === null || node.last_pm25 === undefined ? '--' : formatValue(node.last_pm25, 0), {
-        class: 'metric-pm25 num',
-      }),
-    );
-    row.append(
-      element('td', node.last_noise === null || node.last_noise === undefined ? '--' : formatValue(node.last_noise, 0), {
-        class: 'metric-noise num',
-      }),
-    );
-    row.append(
-      element(
-        'td',
-        node.last_battery === null || node.last_battery === undefined ? '--' : `${formatValue(node.last_battery, 2)} V`,
-        { class: 'num' },
-      ),
-    );
-    row.append(
-      element(
-        'td',
-        node.last_rssi === null || node.last_rssi === undefined ? '--' : `${node.last_rssi} dBm`,
-        { class: 'num' },
-      ),
-    );
-    row.append(element('td', String(node.reading_count ?? 0), { class: 'num' }));
-    row.append(
-      element('td', `${formatTime(node.last_seen, true)}（${formatAge(now() - node.last_seen)}前）`, { class: 'num' }),
-    );
-      const actions = element('td');
+      row.append(element('td', formatValue(node.last_temperature, 1), { class: 'metric-temp num', 'data-label': '温度' }));
+      row.append(element('td', formatValue(node.last_humidity, 1), { class: 'metric-humidity num', 'data-label': '湿度' }));
+      row.append(
+        element('td', node.last_co2 === null || node.last_co2 === undefined ? '--' : formatValue(node.last_co2, 0), {
+          class: 'metric-co2 num',
+          'data-label': 'CO₂',
+        }),
+      );
+      row.append(
+        element('td', node.last_pm25 === null || node.last_pm25 === undefined ? '--' : formatValue(node.last_pm25, 0), {
+          class: 'metric-pm25 num',
+          'data-label': 'PM2.5',
+        }),
+      );
+      row.append(
+        element('td', node.last_noise === null || node.last_noise === undefined ? '--' : formatValue(node.last_noise, 0), {
+          class: 'metric-noise num',
+          'data-label': '噪声',
+        }),
+      );
+      row.append(
+        element(
+          'td',
+          node.last_battery === null || node.last_battery === undefined ? '--' : `${formatValue(node.last_battery, 2)} V`,
+          { class: 'metric-battery num', 'data-label': '电量' },
+        ),
+      );
+      row.append(
+        element(
+          'td',
+          node.last_rssi === null || node.last_rssi === undefined ? '--' : `${node.last_rssi} dBm`,
+          { class: 'num', 'data-label': '信号' },
+        ),
+      );
+      row.append(element('td', String(node.reading_count ?? 0), { class: 'num', 'data-label': '累计上报' }));
+      row.append(
+        element('td', `${formatTime(node.last_seen, true)}（${formatAge(now() - node.last_seen)}前）`, {
+          class: 'num',
+          'data-label': '最后上报',
+        }),
+      );
+      const actions = element('td', null, { 'data-label': '操作' });
       actions.append(button('详情', () => openNodeDialog(node.device_id)));
       row.append(actions);
       body.append(row);
@@ -955,6 +1249,7 @@
         ['信号', node.last_rssi === null || node.last_rssi === undefined ? '--' : `${node.last_rssi} dBm`],
         ['累计上报', `${node.reading_count ?? 0} 条`],
         ['首次接入', formatTime(node.first_seen, true)],
+        ['趋势窗口', `${data.window_minutes || state.liveWindow} 分钟`],
       ];
       for (const [label, value] of rows) {
         const row = element('div');
@@ -962,21 +1257,32 @@
         summary.append(row);
       }
       const points = (data.readings || []).map((item) => ({ ...item }));
-      if (!state.charts.node) state.charts.node = new LineChart($('node-chart'), { emptyText: '最近 30 分钟暂无数据' });
+      const windowMinutes = data.window_minutes || state.liveWindow;
+      const end = data.server_time || now();
+      if (!state.charts.node) {
+        state.charts.node = new LineChart($('node-chart'), { emptyText: '该窗口内暂无数据' });
+      }
+      state.charts.node.setEmptyText(`最近 ${windowMinutes} 分钟暂无数据`);
+      const [domainStart, domainEnd] = growingDomain(points, end, windowMinutes * 60);
+      state.charts.node.setDomain(domainStart, domainEnd);
       state.charts.node.setSeries([
         {
           label: '温度',
           color: metricColor('temperature'),
           unit: ' °C',
+          digits: 1,
           axis: 0,
           fill: true,
+          maxGap: 180,
           points: points.filter((point) => Number.isFinite(point.temperature)).map((point) => [point.ts, point.temperature]),
         },
         {
           label: '湿度',
           color: metricColor('humidity'),
           unit: ' %RH',
+          digits: 1,
           axis: 1,
+          maxGap: 180,
           points: points.filter((point) => Number.isFinite(point.humidity)).map((point) => [point.ts, point.humidity]),
         },
       ]);
@@ -1060,11 +1366,34 @@
     const data = await api(`/api/alerts?state=${encodeURIComponent(filter)}&limit=300`);
     state.alerts = data.alerts || [];
     state.alertCounts = data.counts || state.alertCounts;
+    state.severityCounts = data.severity_counts || state.severityCounts;
     renderAlertCards();
+    renderAlertSummary();
     renderRecentAlerts();
     renderCards();
     const counts = state.alertCounts;
-    $('alert-count').textContent = `未处理 ${counts.open || 0} · 已确认 ${counts.acknowledged || 0} · 已恢复 ${counts.resolved || 0}`;
+    $('alert-count').textContent = `当前显示 ${state.alerts.length} 条 · 未处理 ${counts.open || 0} · 已确认 ${counts.acknowledged || 0} · 已静默 ${counts.muted || 0} · 已恢复 ${counts.resolved || 0}`;
+  }
+
+  function renderAlertSummary() {
+    const container = $('alert-summary');
+    if (!container) return;
+    const counts = state.alertCounts;
+    const chips = [
+      ['open', '未处理', counts.open || 0],
+      ['acknowledged', '已确认', counts.acknowledged || 0],
+      ['muted', '已静默', counts.muted || 0],
+      ['resolved', '已恢复', counts.resolved || 0],
+      ['critical', '严重', state.severityCounts.critical || 0],
+      ['warning', '警告', state.severityCounts.warning || 0],
+    ];
+    container.replaceChildren(
+      ...chips.map(([key, label, value]) => {
+        const chip = element('span', null, { class: `count-chip ${key}` });
+        chip.append(element('strong', String(value)), document.createTextNode(label));
+        return chip;
+      }),
+    );
   }
 
   function renderAlertCards() {
@@ -1084,16 +1413,30 @@
         element(
           'div',
           `${alert.device_name || alert.device_id}${alert.room ? ` · ${alert.room}` : ''} · 触发于 ${formatTime(alert.opened_at, true)}` +
-            (alert.resolved_at ? ` · 恢复于 ${formatTime(alert.resolved_at, true)}` : ''),
+            (alert.resolved_at ? ` · 恢复于 ${formatTime(alert.resolved_at, true)}` : '') +
+            (alert.state === 'muted' && alert.muted_until ? ` · 静默至 ${formatTime(alert.muted_until, true)}` : ''),
           { class: 'hint' },
         ),
       );
       body.append(element('span', kindLabel(alert.kind), { class: 'hint' }));
-      card.append(body);
-      if (alert.state === 'open') {
-        card.append(button('确认', () => ackAlert(alert.id), 'primary'));
+      if (alert.acknowledged_by || alert.resolved_by) {
+        const operator = alert.resolved_by || alert.acknowledged_by;
+        const action = alert.resolved_by ? '关闭' : '确认';
+        const stamp = alert.resolved_at || alert.acknowledged_at;
+        body.append(
+          element('span', `由 ${operator} ${action}${stamp ? ` · ${formatTime(stamp, true)}` : ''}`, {
+            class: 'alert-ack-meta',
+          }),
+        );
       }
+      if (alert.note) body.append(element('span', `备注：${alert.note}`, { class: 'alert-ack-meta' }));
+      card.append(body);
       card.append(element('span', STATE_LABELS[alert.state] || alert.state, { class: `state ${alert.state}` }));
+      if (alert.state !== 'resolved') {
+        const actions = element('div', null, { class: 'alert-actions' });
+        actions.append(button('处理', () => openAlertDialog(alert), 'primary'));
+        card.append(actions);
+      }
       container.append(card);
     }
   }
@@ -1106,15 +1449,66 @@
         humidity_high: '湿度过高',
         humidity_low: '湿度过低',
         co2_high: 'CO₂ 浓度过高',
+        pm25_high: 'PM2.5 过高',
+        noise_high: '噪声过高',
+        light_low: '光照不足',
+        battery_low: '节点电量低',
         device_offline: '节点离线',
       }[kind] || kind
     );
   }
 
-  async function ackAlert(id) {
-    await api(`/api/alerts/${id}/ack`, { method: 'POST' });
-    await Promise.all([loadAlerts(), loadOverview().catch(() => {})]);
-    notify('告警已确认');
+  function openAlertDialog(alert) {
+    state.alertAction = alert;
+    $('alert-action-title').textContent = '处理告警';
+    $('alert-action-message').textContent = alert.message;
+    const meta = $('alert-action-meta');
+    meta.replaceChildren();
+    const rows = [
+      ['节点', `${alert.device_name || alert.device_id}${alert.room ? `（${alert.room}）` : ''}`],
+      ['类型', kindLabel(alert.kind)],
+      ['触发时间', formatTime(alert.opened_at, true)],
+      ['当前状态', STATE_LABELS[alert.state] || alert.state],
+    ];
+    if (alert.acknowledged_by) rows.push(['处理人', alert.acknowledged_by]);
+    if (alert.note) rows.push(['已有备注', alert.note]);
+    for (const [label, value] of rows) {
+      const row = element('div');
+      row.append(element('span', label), element('strong', String(value)));
+      meta.append(row);
+    }
+    $('alert-note').value = '';
+    $('alert-action-note').textContent = '';
+    const dialog = $('alert-dialog');
+    dialog.showModal();
+    dialog.focus();
+  }
+
+  async function submitAlertAction(action) {
+    const alert = state.alertAction;
+    if (!alert) return;
+    const note = $('alert-note').value.trim();
+    const minutes = Number($('alert-mute-minutes').value) || 60;
+    const noteNode = $('alert-action-note');
+    const buttons = [...document.querySelectorAll('#alert-dialog .alert-actions button')];
+    noteNode.textContent = '正在提交…';
+    buttons.forEach((item) => {
+      item.disabled = true;
+    });
+    try {
+      await api(`/api/alerts/${alert.id}/${action}`, { method: 'POST', body: { note, minutes } });
+      $('alert-dialog').close();
+      state.alertAction = null;
+      await Promise.all([loadAlerts().catch(() => {}), loadOverview().catch(() => {})]);
+      const text = action === 'ack' ? '告警已确认' : action === 'mute' ? `告警已静默 ${minutes} 分钟` : '告警已关闭';
+      notify(text);
+    } catch (error) {
+      noteNode.textContent = error.message;
+    } finally {
+      buttons.forEach((item) => {
+        item.disabled = false;
+      });
+    }
   }
 
   async function ackAll() {
@@ -1134,7 +1528,11 @@
     if (deviceId) params.set('device_id', deviceId);
     const data = await api(`/api/readings?${params.toString()}`);
     state.history.series = data.series || [];
-    $('history-range-note').textContent = `${rangeLabel(data.range)}，聚合间隔 ${bucketLabel(data.bucket)}`;
+    state.history.start = data.start || 0;
+    state.history.end = data.end || 0;
+    state.history.bucket = data.bucket || 60;
+    $('history-range-note').textContent =
+      `${rangeLabel(data.range)}，${formatTime(data.start, true)} 至 ${formatTime(data.end, true)}，聚合间隔 ${bucketLabel(data.bucket)}`;
     renderHistoryStats();
     renderHistoryChart();
     $('history-note').textContent = `${state.history.series.length} 个节点 · ${state.history.series.reduce((sum, item) => sum + item.points.length, 0)} 个数据点`;
@@ -1205,17 +1603,22 @@
     const metric = state.history.metric;
     const meta = METRICS[metric];
     const palette = ['#00a0ea', '#e0762f', '#7a5af8', '#168446', '#b82c35', '#af6b0e'];
+    const maxGap = Math.max(60, (state.history.bucket || 60) * 3);
     const series = state.history.series.map((item, index) => ({
       label: item.name || item.device_id,
       color: palette[index % palette.length],
-      unit: ` ${meta.unit.trim()}`,
+      unit: ` ${meta.unit}`,
       digits: meta.digits,
       axis: 0,
       fill: state.history.series.length === 1,
+      maxGap,
       points: item.points
         .filter((point) => Number.isFinite(point[metric]))
         .map((point) => [point.ts, point[metric]]),
     }));
+    if (state.history.start && state.history.end) {
+      state.charts.history.setDomain(state.history.start, state.history.end);
+    }
     state.charts.history.setSeries(series);
     $('history-title').textContent = `${meta.label}历史曲线`;
     const legend = $('history-legend');
@@ -1315,6 +1718,7 @@
 
   const ADDRESS_SOURCE_TEXT = {
     configured: '来自配置或设置页',
+    public: '自动探测公网出口',
     listen: '来自监听地址',
     lan: '按本机网卡推断',
     loopback: '本机回环地址',
@@ -1322,6 +1726,12 @@
 
   function addressSourceText(source) {
     return ADDRESS_SOURCE_TEXT[source] || '自动推断';
+  }
+
+  function publicSourceText(source) {
+    if (source === 'tencent') return '腾讯云元数据';
+    if (source === 'aliyun') return '阿里云元数据';
+    return source ? '公网回显' : '';
   }
 
   async function loadSettings() {
@@ -1332,6 +1742,10 @@
     const temperature = rules.temperature || {};
     const humidity = rules.humidity || {};
     const co2 = rules.co2 || {};
+    const pm25 = rules.pm25 || {};
+    const noise = rules.noise || {};
+    const light = rules.light || {};
+    const battery = rules.battery || {};
     $('set-temp-low').value = temperature.low ?? '';
     $('set-temp-high').value = temperature.high ?? '';
     $('set-temp-critical-low').value = temperature.critical_low ?? '';
@@ -1342,18 +1756,44 @@
     $('set-humidity-critical-high').value = humidity.critical_high ?? '';
     $('set-co2-high').value = co2.high ?? '';
     $('set-co2-critical-high').value = co2.critical_high ?? '';
+    $('set-pm25-high').value = pm25.high ?? '';
+    $('set-pm25-critical-high').value = pm25.critical_high ?? '';
+    $('set-noise-high').value = noise.high ?? '';
+    $('set-noise-critical-high').value = noise.critical_high ?? '';
+    $('set-light-low').value = light.low ?? '';
+    $('set-light-critical-low').value = light.critical_low ?? '';
+    $('set-battery-low').value = battery.low ?? '';
+    $('set-battery-critical-low').value = battery.critical_low ?? '';
     $('set-offline').value = data.settings.offline_timeout ?? 90;
     $('set-retention').value = data.settings.retention_days ?? 30;
+    $('set-live-window').value = data.settings.live_window_minutes ?? 25;
     $('set-public-url').value = data.settings.public_url || '';
+    applyLiveWindow(data.settings.live_window_minutes ?? 25);
+    updateLiveCharts();
     const device = data.device || {};
     const serverInfo = data.server || {};
+    const urlNote = $('public-url-note');
+    if (serverInfo.public_url_source === 'loopback') {
+      urlNote.textContent = '当前只监听本机，其他电脑无法访问面板。';
+    } else if (serverInfo.public_url_source === 'lan') {
+      urlNote.textContent = '当前按本机网卡推断；如果从公网访问，请点“使用当前访问地址”。';
+    } else if (serverInfo.public_url_source === 'public') {
+      urlNote.textContent = `已自动探测公网出口 ${serverInfo.detected_public_ip || ''}。`;
+    } else {
+      urlNote.textContent = '';
+    }
     const info = $('device-info');
     info.replaceChildren();
     const rows = [
       ['上报地址', device.ingest_url || '--'],
       ['地址来源', addressSourceText(serverInfo.public_url_source)],
+      ['当前访问', serverInfo.request_origin || '--'],
+      ['公网出口', serverInfo.detected_public_ip
+        ? `${serverInfo.detected_public_ip}（${publicSourceText(serverInfo.detected_public_ip_source)}）`
+        : '未探测到'],
       ['节点密钥', device.key || '--'],
       ['离线判定', `${device.offline_timeout ?? '--'} 秒`],
+      ['实时窗口', `${data.settings.live_window_minutes ?? 25} 分钟`],
       ['单批上限', `${device.max_batch ?? '--'} 条`],
     ];
     for (const [label, value] of rows) {
@@ -1396,6 +1836,7 @@
       ['运行时长', formatUptime(server.uptime)],
       ['监听地址', `${server.host || '--'}:${server.port || '--'}`],
       ['对外地址', server.public_url || '--'],
+      ['PWA', window.isSecureContext ? '可安装到主屏幕' : '需要 HTTPS 才能安装'],
       ['数据模拟器', server.simulator ? '已开启' : '已关闭'],
     ];
     for (const [label, value] of aboutRows) {
@@ -1477,18 +1918,28 @@
       'set-humidity-critical-high',
       'set-co2-high',
       'set-co2-critical-high',
+      'set-pm25-high',
+      'set-pm25-critical-high',
+      'set-noise-high',
+      'set-noise-critical-high',
+      'set-light-low',
+      'set-light-critical-low',
+      'set-battery-low',
+      'set-battery-critical-low',
       'set-offline',
       'set-retention',
+      'set-live-window',
     ];
     const empty = fields.find((id) => $(id).value.trim() === '' || !Number.isFinite(Number($(id).value)));
     if (empty) {
-      $('settings-note').textContent = '请填写全部阈值后再保存';
+      $('settings-note').textContent = '请填写全部阈值与运行参数后再保存';
       return;
     }
     const number = (id) => Number($(id).value);
     const payload = {
       offline_timeout: number('set-offline'),
       retention_days: number('set-retention'),
+      live_window_minutes: number('set-live-window'),
       alerts: {
         temperature: {
           low: number('set-temp-low'),
@@ -1503,17 +1954,42 @@
           critical_high: number('set-humidity-critical-high'),
         },
         co2: { high: number('set-co2-high'), critical_high: number('set-co2-critical-high') },
+        pm25: { high: number('set-pm25-high'), critical_high: number('set-pm25-critical-high') },
+        noise: { high: number('set-noise-high'), critical_high: number('set-noise-critical-high') },
+        light: { low: number('set-light-low'), critical_low: number('set-light-critical-low') },
+        battery: { low: number('set-battery-low'), critical_low: number('set-battery-critical-low') },
       },
     };
     $('settings-note').textContent = '正在保存…';
     try {
       const data = await api('/api/settings', { method: 'PUT', body: payload });
       state.settings = data.settings;
+      applyLiveWindow(data.settings.live_window_minutes ?? state.liveWindow);
+      ensureLiveCharts();
+      updateLiveCharts();
+      renderCards();
+      renderEnvironment();
       $('settings-note').textContent = '已保存并立即生效';
       notify('告警阈值与运行参数已更新');
     } catch (error) {
       $('settings-note').textContent = error.message;
     }
+  }
+
+  function useCurrentUrl() {
+    const note = $('public-url-note');
+    const host = window.location.hostname;
+    const loopback = ['127.0.0.1', 'localhost', '::1', '[::1]', '0.0.0.0'].includes(host);
+    if (loopback) {
+      note.textContent = '你现在是通过本机地址打开的，别人访问不到；请用公网 IP 或域名打开面板后再点。';
+      return;
+    }
+    if (!/^https?:$/.test(window.location.protocol)) {
+      note.textContent = '当前页面不是通过 http/https 打开的，无法自动填入。';
+      return;
+    }
+    $('set-public-url').value = window.location.origin;
+    note.textContent = '已填入当前访问地址，点“保存对外地址”生效。';
   }
 
   async function savePublicUrl(event) {
@@ -1554,8 +2030,9 @@
 
     $('live-node').addEventListener('change', async (event) => {
       state.liveNode = event.target.value;
+      ensureLiveCharts();
       if (!state.liveSeries.has(state.liveNode)) await loadLiveSeries(state.liveNode);
-      else renderLiveChart();
+      else updateLiveCharts();
     });
     $('dashboard-refresh').addEventListener('click', () => loadOverview().catch(notifyError));
     $('refresh-all').addEventListener('click', () => {
@@ -1576,6 +2053,12 @@
     $('alert-filter').addEventListener('change', () => loadAlerts().catch(notifyError));
     $('refresh-alerts').addEventListener('click', () => loadAlerts().catch(notifyError));
     $('ack-all-alerts').addEventListener('click', () => ackAll().catch(notifyError));
+    $('alert-do-ack').addEventListener('click', () => submitAlertAction('ack').catch(notifyError));
+    $('alert-do-mute').addEventListener('click', () => submitAlertAction('mute').catch(notifyError));
+    $('alert-do-resolve').addEventListener('click', () => submitAlertAction('resolve').catch(notifyError));
+    $('alert-dialog').addEventListener('close', () => {
+      state.alertAction = null;
+    });
 
     $('history-refresh').addEventListener('click', () => loadHistory().catch(notifyError));
     $('history-range').addEventListener('change', () => loadHistory().catch(notifyError));
@@ -1602,6 +2085,7 @@
     $('settings-form').addEventListener('submit', (event) => saveSettings(event).catch(notifyError));
     $('settings-reload').addEventListener('click', () => loadSettings().catch(notifyError));
     $('public-url-form').addEventListener('submit', (event) => savePublicUrl(event).catch(notifyError));
+    $('use-current-url').addEventListener('click', useCurrentUrl);
     $('copy-ingest').addEventListener('click', () => copyText(state.device?.ingest_url || '', '上报地址'));
     $('copy-device-key').addEventListener('click', () => copyText(state.device?.key || '', '节点密钥'));
     $('regen-device-key').addEventListener('click', () => regenerateDeviceKey().catch(notifyError));
@@ -1609,7 +2093,10 @@
 
     window.addEventListener('roomsense:theme', () => {
       renderMetricChips();
-      renderLiveChart();
+      ensureLiveCharts();
+      updateLiveCharts();
+      renderCards();
+      renderEnvironment();
       if (state.charts.history) renderHistoryChart();
     });
     window.addEventListener('storage', (event) => {
@@ -1619,7 +2106,14 @@
     });
     window.addEventListener('beforeunload', () => {
       if (state.stream) state.stream.close();
+      clearInterval(state.liveTicker);
     });
+    registerServiceWorker();
+  }
+
+  function registerServiceWorker() {
+    if (!('serviceWorker' in navigator) || !/^https?:$/.test(window.location.protocol)) return;
+    navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {});
   }
 
   document.addEventListener('DOMContentLoaded', () => {

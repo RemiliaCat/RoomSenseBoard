@@ -72,7 +72,14 @@ function Remove-BuildPath {
             Remove-Item -LiteralPath $full -Recurse -Force
         }
         catch {
-            throw ('无法删除 ' + $full + '：可能有 RoomSenseBoard.exe 正在运行。请先关闭它，或用 -DistPath 换一个输出目录。' + [Environment]::NewLine + $_.Exception.Message)
+            # 常见情况：有终端窗口停在发布目录里（目录被当成工作目录占用），但内容已经清空。
+            # 空目录可以直接复用，不影响后续写入。
+            $remaining = @(Get-ChildItem -LiteralPath $full -Force -ErrorAction SilentlyContinue)
+            if ((Test-Path -LiteralPath $full -PathType Container) -and $remaining.Count -eq 0) {
+                Write-Detail ('目录被占用但已清空，直接复用：' + $full)
+                return
+            }
+            throw ('无法删除 ' + $full + '：可能有 RoomSenseBoard.exe 正在运行，或有终端停在该目录。请先关闭它，或用 -DistPath 换一个输出目录。' + [Environment]::NewLine + $_.Exception.Message)
         }
     }
 }
@@ -234,8 +241,10 @@ function Invoke-BootTest {
     }
     finally {
         if ($process -and -not $process.HasExited) {
-            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Milliseconds 600
+            # 单文件 exe 是"引导进程 + 子进程"两层结构，只结束父进程会把真正的服务留在后台，
+            # 继续占着端口和临时目录，所以按进程树一起结束。
+            & taskkill /PID $process.Id /T /F 2>&1 | Out-Null
+            Start-Sleep -Milliseconds 800
         }
         Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue

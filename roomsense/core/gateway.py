@@ -280,25 +280,26 @@ class DeviceGateway:
         timeout = int(settings.get('offline_timeout', 90))
         nodes = self.storage.list_nodes(offline_timeout=timeout)
         stats = self.storage.stats(offline_timeout=timeout)
-        recent = self.storage.list_alerts(states=('open', 'acknowledged'), limit=8)
-        temperatures = [node['last_temperature'] for node in nodes if node['last_temperature'] is not None]
-        humidities = [node['last_humidity'] for node in nodes if node['last_humidity'] is not None]
+        recent = self.storage.list_alerts(states=('open', 'acknowledged', 'muted'), limit=8)
+        averages: dict[str, float | None] = {}
+        for field in ('temperature', 'humidity', 'co2', 'pm25', 'noise', 'light', 'battery'):
+            values = [node[f'last_{field}'] for node in nodes if node.get(f'last_{field}') is not None]
+            averages[field] = round(sum(values) / len(values), 2) if values else None
         return {
             'server_time': int(time.time()),
             'stats': stats,
             'nodes': nodes,
             'alerts': recent,
             'alert_counts': self.storage.alert_counts(),
-            'averages': {
-                'temperature': round(sum(temperatures) / len(temperatures), 2) if temperatures else None,
-                'humidity': round(sum(humidities) / len(humidities), 2) if humidities else None,
-            },
+            'severity_counts': self.storage.alert_severity_counts(),
+            'averages': averages,
             'settings': {
                 'offline_timeout': timeout,
                 'retention_days': settings.get('retention_days', 30),
+                'live_window_minutes': settings.get('live_window_minutes', 25),
                 'alerts': settings.get('alerts', {}),
             },
-            'live_window_minutes': settings.get('live_window_minutes', 30),
+            'live_window_minutes': settings.get('live_window_minutes', 25),
         }
 
     def update_settings(self, patch: dict[str, Any]) -> dict[str, Any]:
@@ -312,14 +313,20 @@ class DeviceGateway:
         merged = {
             'offline_timeout': patch.get('offline_timeout', current.get('offline_timeout', 90)),
             'retention_days': patch.get('retention_days', current.get('retention_days', 30)),
+            'live_window_minutes': patch.get(
+                'live_window_minutes', current.get('live_window_minutes', 25)
+            ),
             'public_url': public_url,
             'alerts': _merge_rules(current.get('alerts') or {}, patch.get('alerts') or {}),
+            'max_batch': current.get('max_batch', 256),
         }
         try:
             merged['offline_timeout'] = max(15, min(3600, int(merged['offline_timeout'])))
             merged['retention_days'] = max(1, min(365, int(merged['retention_days'])))
+            merged['live_window_minutes'] = max(5, min(120, int(merged['live_window_minutes'])))
+            merged['max_batch'] = max(1, min(1000, int(merged['max_batch'])))
         except (TypeError, ValueError) as error:
-            raise ValidationError('离线超时与保留天数必须是整数') from error
+            raise ValidationError('离线超时、保留天数与实时窗口必须是整数') from error
         self.storage.save_runtime_settings(merged)
         self._log('INFO', 'settings', '告警阈值与运行参数已更新')
         self.bus.publish('settings', merged)
@@ -351,35 +358,52 @@ def default_runtime_settings(config: dict[str, Any]) -> dict[str, Any]:
         'retention_days': int(config['storage']['retention_days']),
         'public_url': str(config['server'].get('public_url') or ''),
         'alerts': config['alerts'],
-        'live_window_minutes': int(config['storage']['live_window_minutes']),
+        'live_window_minutes': max(5, min(120, int(config['storage']['live_window_minutes']))),
         'max_batch': int(config['device']['max_batch']),
     }
 
 
+RULE_LIMITS: dict[str, tuple[float, float]] = {
+    'temperature': (-20.0, 60.0),
+    'humidity': (0.0, 100.0),
+    'co2': (200.0, 5000.0),
+    'pm25': (0.0, 1000.0),
+    'noise': (0.0, 140.0),
+    'light': (0.0, 200000.0),
+    'battery': (0.0, 15.0),
+}
+
+
 def _merge_rules(current: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    '''合并各指标的阈值与回差，只接受已有字段与合理范围。'''
+    if not isinstance(patch, dict):
+        raise ValidationError('alerts 阈值必须是对象')
     merged: dict[str, Any] = {}
-    for family in ('temperature', 'humidity', 'co2'):
-        base = dict(current.get(family) or {})
+    for family, base_rule in current.items():
+        if not isinstance(base_rule, dict):
+            continue
         update = patch.get(family) or {}
         if not isinstance(update, dict):
             raise ValidationError(f'{family} 阈值必须是对象')
+        rule = dict(base_rule)
         for key, value in update.items():
-            if key not in base:
+            if key not in rule:
                 continue
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ValidationError(f'{family}.{key} 必须是数字')
-            base[key] = round(float(value), 2)
-        merged[family] = base
-    limits = {
-        'temperature': (-20.0, 60.0),
-        'humidity': (0.0, 100.0),
-        'co2': (200.0, 5000.0),
-    }
-    for family, (low, high) in limits.items():
-        rule = merged[family]
+            rule[key] = round(float(value), 3)
+        merged[family] = rule
+
+    for family, rule in merged.items():
+        limits = RULE_LIMITS.get(family)
+        if limits is None:
+            continue
+        low, high = limits
         for key in ('low', 'high', 'critical_low', 'critical_high'):
             if key in rule and not low <= float(rule[key]) <= high:
-                raise ValidationError(f'{family}.{key} 超出合理范围 {low} ~ {high}')
+                raise ValidationError(f'{family}.{key} 超出合理范围 {low:g} ~ {high:g}')
+        if 'hysteresis' in rule and not 0 <= float(rule['hysteresis']) <= 1000:
+            raise ValidationError(f'{family}.hysteresis 必须是非负数')
         if 'low' in rule and 'high' in rule and float(rule['low']) >= float(rule['high']):
             raise ValidationError(f'{family} 下限必须小于上限')
         if 'critical_low' in rule and 'low' in rule and float(rule['critical_low']) > float(rule['low']):

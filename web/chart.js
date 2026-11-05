@@ -10,7 +10,7 @@
 @Contact   :   RemiliaCatNero@gmail.com
 @License   :   AGPL
 @Copyright :   (C) 2026, RoomSense-Team
-@Desc      :   轻量 Canvas 折线图：双轴、自适应网格与悬停读数。
+@Desc      :   轻量 Canvas 折线图：固定时间域、自适应刻度与悬停读数。
 */
 'use strict';
 
@@ -20,11 +20,14 @@ class LineChart {
     this.ctx = canvas.getContext('2d');
     this.options = options;
     this.series = [];
+    this.guides = [];
+    this.domain = null;
     this.emptyText = options.emptyText || '暂无数据';
     this.padding = { top: 14, right: 12, bottom: 28, left: 12 };
     this.hover = null;
     this.frame = null;
     this.destroyed = false;
+    this.dragging = false;
 
     this.tooltip = document.createElement('div');
     this.tooltip.className = 'chart-tooltip';
@@ -36,13 +39,20 @@ class LineChart {
     }
 
     this.onMove = (event) => this.handleMove(event);
-    this.onLeave = () => {
-      this.hover = null;
-      this.tooltip.hidden = true;
-      this.schedule();
+    this.onLeave = () => this.clearHover();
+    this.onDown = (event) => {
+      this.dragging = true;
+      this.handleMove(event);
     };
-    canvas.addEventListener('mousemove', this.onMove);
-    canvas.addEventListener('mouseleave', this.onLeave);
+    this.onUp = (event) => {
+      this.dragging = false;
+      if (event.pointerType && event.pointerType !== 'mouse') this.clearHover();
+    };
+    canvas.addEventListener('pointermove', this.onMove);
+    canvas.addEventListener('pointerdown', this.onDown);
+    canvas.addEventListener('pointerup', this.onUp);
+    canvas.addEventListener('pointercancel', this.onUp);
+    canvas.addEventListener('pointerleave', this.onLeave);
     this.onTheme = () => this.schedule();
     window.addEventListener('roomsense:theme', this.onTheme);
 
@@ -52,15 +62,39 @@ class LineChart {
   }
 
   setSeries(series) {
-    this.series = (series || []).map((item) => ({
-      axis: 0,
-      digits: 1,
-      unit: '',
-      ...item,
-      points: (item.points || []).filter((point) => Number.isFinite(point[1])),
-    }));
-    if (this.hover) this.hover = null;
+    this.series = (series || []).map((item) => {
+      const sorted = (item.points || [])
+        .filter((point) => Number.isFinite(point[1]))
+        .sort((a, b) => a[0] - b[0]);
+      const points = [];
+      for (const point of sorted) {
+        if (points.length && points[points.length - 1][0] === point[0]) points[points.length - 1] = point;
+        else points.push(point);
+      }
+      return {
+        axis: 0,
+        digits: 1,
+        unit: '',
+        ...item,
+        points,
+      };
+    });
+    this.hover = null;
     this.tooltip.hidden = true;
+    this.schedule();
+  }
+
+  setDomain(start, end) {
+    if (Number.isFinite(start) && Number.isFinite(end) && end > start) {
+      this.domain = { start, end };
+    } else {
+      this.domain = null;
+    }
+    this.schedule();
+  }
+
+  setGuides(guides) {
+    this.guides = (guides || []).filter((guide) => Number.isFinite(guide.value));
     this.schedule();
   }
 
@@ -72,11 +106,21 @@ class LineChart {
   destroy() {
     this.destroyed = true;
     cancelAnimationFrame(this.frame);
-    this.canvas.removeEventListener('mousemove', this.onMove);
-    this.canvas.removeEventListener('mouseleave', this.onLeave);
+    this.canvas.removeEventListener('pointermove', this.onMove);
+    this.canvas.removeEventListener('pointerdown', this.onDown);
+    this.canvas.removeEventListener('pointerup', this.onUp);
+    this.canvas.removeEventListener('pointercancel', this.onUp);
+    this.canvas.removeEventListener('pointerleave', this.onLeave);
     window.removeEventListener('roomsense:theme', this.onTheme);
     this.observer.disconnect();
     this.tooltip.remove();
+  }
+
+  clearHover() {
+    this.hover = null;
+    this.dragging = false;
+    this.tooltip.hidden = true;
+    this.schedule();
   }
 
   schedule() {
@@ -118,11 +162,12 @@ class LineChart {
     }
 
     const hasRight = visible.some((item) => item.axis === 1);
+    const compact = width < 420;
     const padding = {
       top: this.padding.top,
-      right: hasRight ? 52 : 16,
+      right: hasRight ? (compact ? 42 : 52) : compact ? 14 : 16,
       bottom: this.padding.bottom,
-      left: 52,
+      left: compact ? 42 : 52,
     };
     const plot = {
       x: padding.left,
@@ -131,14 +176,21 @@ class LineChart {
       height: Math.max(10, height - padding.top - padding.bottom),
     };
 
-    const times = visible.flatMap((item) => item.points.map((point) => point[0]));
-    let xMin = Math.min(...times);
-    let xMax = Math.max(...times);
-    if (xMax - xMin < 60) {
-      xMin -= 30;
-      xMax += 30;
+    let xMin;
+    let xMax;
+    if (this.domain) {
+      xMin = this.domain.start;
+      xMax = this.domain.end;
+    } else {
+      const times = visible.flatMap((item) => item.points.map((point) => point[0]));
+      xMin = Math.min(...times);
+      xMax = Math.max(...times);
+      if (xMax - xMin < 60) {
+        xMin -= 30;
+        xMax += 30;
+      }
     }
-    const timeSpan = xMax - xMin;
+    const timeSpan = Math.max(1, xMax - xMin);
     const xScale = (ts) => plot.x + ((ts - xMin) / timeSpan) * plot.width;
 
     const scales = {
@@ -147,17 +199,29 @@ class LineChart {
     };
     const yScale = (axis, value) => {
       const scale = scales[axis];
-      const ratio = (value - scale.min) / (scale.max - scale.min);
-      return plot.y + plot.height - ratio * plot.height;
+      const position = (value - scale.min) / (scale.max - scale.min);
+      return plot.y + plot.height - position * plot.height;
     };
+    const axisDigits = (axis) => {
+      const items = visible.filter((item) => item.axis === axis);
+      return items.reduce((digits, item) => Math.max(digits, Number(item.digits) || 0), 0);
+    };
+    const ticks = Math.max(2, Math.min(6, Math.round(plot.height / 46)));
+    const tickDigits = (axis) => {
+      const scale = scales[axis];
+      const step = (scale.max - scale.min) / Math.max(1, ticks);
+      const needed = step > 0 ? Math.ceil(-Math.log10(step)) : 0;
+      return Math.min(3, Math.max(axisDigits(axis), needed));
+    };
+    const leftDigits = tickDigits(0);
+    const rightDigits = hasRight ? tickDigits(1) : 0;
 
     ctx.lineWidth = 1;
     ctx.strokeStyle = lineColor;
     ctx.fillStyle = mutedColor;
-    ctx.font = '11px system-ui, "Microsoft YaHei", sans-serif';
+    ctx.font = `${compact ? 10 : 11}px system-ui, "Microsoft YaHei", sans-serif`;
     ctx.textBaseline = 'middle';
 
-    const ticks = Math.max(2, Math.min(6, Math.round(plot.height / 46)));
     for (let index = 0; index <= ticks; index += 1) {
       const y = plot.y + (plot.height / ticks) * index;
       ctx.globalAlpha = 0.7;
@@ -168,16 +232,15 @@ class LineChart {
       ctx.globalAlpha = 1;
       ctx.textAlign = 'right';
       const leftValue = scales[0].max - ((scales[0].max - scales[0].min) / ticks) * index;
-      ctx.fillText(formatValue(leftValue), plot.x - 8, y);
+      ctx.fillText(formatValue(leftValue, leftDigits), plot.x - 7, y);
       if (hasRight) {
         ctx.textAlign = 'left';
         const rightValue = scales[1].max - ((scales[1].max - scales[1].min) / ticks) * index;
-        ctx.fillText(formatValue(rightValue), plot.x + plot.width + 8, y);
+        ctx.fillText(formatValue(rightValue, rightDigits), plot.x + plot.width + 7, y);
       }
     }
 
-    const verticalTicks = Math.max(2, Math.min(6, Math.round(plot.width / 110)));
-    ctx.textAlign = 'center';
+    const verticalTicks = Math.max(2, Math.min(6, Math.round(plot.width / (compact ? 78 : 110))));
     ctx.textBaseline = 'top';
     for (let index = 0; index <= verticalTicks; index += 1) {
       const x = plot.x + (plot.width / verticalTicks) * index;
@@ -188,43 +251,71 @@ class LineChart {
       ctx.stroke();
       ctx.globalAlpha = 1;
       const ts = xMin + (timeSpan / verticalTicks) * index;
+      if (index === 0) ctx.textAlign = 'left';
+      else if (index === verticalTicks) ctx.textAlign = 'right';
+      else ctx.textAlign = 'center';
       ctx.fillText(formatTime(ts, timeSpan), x, plot.y + plot.height + 8);
     }
 
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(plot.x, plot.y, plot.width, plot.height);
+    ctx.clip();
+
+    for (const guide of this.guides) {
+      if ((guide.axis || 0) !== 0) continue;
+      const scale = scales[0];
+      if (guide.value < scale.min || guide.value > scale.max) continue;
+      ctx.save();
+      ctx.strokeStyle = guide.color || mutedColor;
+      ctx.globalAlpha = 0.55;
+      ctx.setLineDash([5, 4]);
+      ctx.lineWidth = 1;
+      const y = yScale(0, guide.value);
+      ctx.beginPath();
+      ctx.moveTo(plot.x, Math.round(y) + 0.5);
+      ctx.lineTo(plot.x + plot.width, Math.round(y) + 0.5);
+      ctx.stroke();
+      ctx.restore();
+    }
+
     for (const item of visible) {
+      const segments = splitSegments(item.points, item.maxGap);
       ctx.strokeStyle = item.color;
       ctx.lineWidth = 2;
       ctx.lineJoin = 'round';
-      ctx.beginPath();
-      item.points.forEach((point, index) => {
-        const x = xScale(point[0]);
-        const y = yScale(item.axis, point[1]);
-        if (index === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      });
-      ctx.stroke();
-      if (item.fill && item.points.length > 1) {
-        const gradient = ctx.createLinearGradient(0, plot.y, 0, plot.y + plot.height);
-        gradient.addColorStop(0, hexToRgba(item.color, 0.22));
-        gradient.addColorStop(1, hexToRgba(item.color, 0.02));
-        ctx.lineTo(xScale(item.points[item.points.length - 1][0]), plot.y + plot.height);
-        ctx.lineTo(xScale(item.points[0][0]), plot.y + plot.height);
-        ctx.closePath();
-        ctx.fillStyle = gradient;
-        ctx.fill();
-        // 重新描线，避免填充盖住线条
-        ctx.beginPath();
-        item.points.forEach((point, index) => {
-          const x = xScale(point[0]);
-          const y = yScale(item.axis, point[1]);
-          if (index === 0) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
-        });
+      ctx.lineCap = 'round';
+      for (const segment of segments) {
+        if (segment.length === 1) {
+          ctx.beginPath();
+          ctx.fillStyle = item.color;
+          ctx.arc(xScale(segment[0][0]), yScale(item.axis, segment[0][1]), 3.2, 0, Math.PI * 2);
+          ctx.fill();
+          continue;
+        }
+        traceSegment(ctx, segment, xScale, (point) => yScale(item.axis, point[1]));
         ctx.stroke();
+        if (item.fill) {
+          const first = segment[0];
+          const last = segment[segment.length - 1];
+          const gradient = ctx.createLinearGradient(0, plot.y, 0, plot.y + plot.height);
+          gradient.addColorStop(0, hexToRgba(item.color, 0.2));
+          gradient.addColorStop(1, hexToRgba(item.color, 0.02));
+          ctx.beginPath();
+          traceSegment(ctx, segment, xScale, (point) => yScale(item.axis, point[1]));
+          ctx.lineTo(xScale(last[0]), plot.y + plot.height);
+          ctx.lineTo(xScale(first[0]), plot.y + plot.height);
+          ctx.closePath();
+          ctx.fillStyle = gradient;
+          ctx.fill();
+          traceSegment(ctx, segment, xScale, (point) => yScale(item.axis, point[1]));
+          ctx.stroke();
+        }
       }
     }
+    ctx.restore();
 
-    this.geometry = { plot, xMin, xMax, scales, hasRight, panelColor };
+    this.geometry = { plot, xMin, xMax, scales, hasRight, lineColor, panelColor, mutedColor };
     if (this.hover) this.drawHover();
   }
 
@@ -233,8 +324,9 @@ class LineChart {
     let min = Math.min(...values);
     let max = Math.max(...values);
     if (min === max) {
-      min -= 1;
-      max += 1;
+      const padding = Math.abs(min) * 0.05 || 1;
+      min -= padding;
+      max += padding;
     }
     const rawStep = (max - min) / 4;
     let step = niceStep(rawStep);
@@ -254,9 +346,7 @@ class LineChart {
     const x = event.clientX - rect.left;
     const geometry = this.geometry;
     if (x < geometry.plot.x - 6 || x > geometry.plot.x + geometry.plot.width + 6) {
-      this.hover = null;
-      this.tooltip.hidden = true;
-      this.schedule();
+      if (this.hover) this.clearHover();
       return;
     }
     const ratio = (x - geometry.plot.x) / geometry.plot.width;
@@ -265,7 +355,7 @@ class LineChart {
     for (const item of this.series) {
       if (!item.points.length) continue;
       const point = nearestPoint(item.points, time);
-      if (!point) continue;
+      if (!point || point[0] < geometry.xMin || point[0] > geometry.xMax) continue;
       entries.push({ item, point, x: this.timeToX(point[0]), y: this.valueToY(item.axis, point[1]) });
     }
     if (!entries.length) return;
@@ -288,9 +378,10 @@ class LineChart {
 
   drawHover() {
     const ctx = this.ctx;
-    const { plot, panelColor } = this.geometry;
+    const { plot, lineColor, panelColor } = this.geometry;
     ctx.save();
-    ctx.strokeStyle = panelColor === '#fff' ? '#0003' : '#fff4';
+    ctx.strokeStyle = lineColor;
+    ctx.globalAlpha = 1;
     ctx.lineWidth = 1;
     ctx.setLineDash([4, 3]);
     ctx.beginPath();
@@ -333,6 +424,31 @@ class LineChart {
   }
 }
 
+function traceSegment(ctx, points, xScale, yScale) {
+  ctx.beginPath();
+  points.forEach((point, index) => {
+    const x = xScale(point[0]);
+    const y = yScale(point);
+    if (index === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+}
+
+function splitSegments(points, maxGap) {
+  if (!maxGap || points.length < 2) return [points];
+  const segments = [];
+  let current = [points[0]];
+  for (let index = 1; index < points.length; index += 1) {
+    if (points[index][0] - points[index - 1][0] > maxGap) {
+      segments.push(current);
+      current = [];
+    }
+    current.push(points[index]);
+  }
+  segments.push(current);
+  return segments;
+}
+
 function nearestPoint(points, time) {
   let low = 0;
   let high = points.length - 1;
@@ -366,8 +482,9 @@ function formatValue(value, digits = 1) {
 function formatTime(ts, span) {
   const date = new Date(ts * 1000);
   const pad = (value) => String(value).padStart(2, '0');
-  if (span > 3 * 86400) return `${date.getMonth() + 1}-${pad(date.getDate())}`;
-  if (span <= 900) return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  if (span >= 3 * 86400) return `${date.getMonth() + 1}-${pad(date.getDate())}`;
+  if (span >= 20 * 3600) return `${date.getMonth() + 1}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  if (span <= 600) return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
   return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 

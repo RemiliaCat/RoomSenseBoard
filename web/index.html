@@ -18,16 +18,23 @@
 
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="color-scheme" content="light dark" />
-    <title>RoomSenseBoard · 室内环境感知</title>
+  <meta name="theme-color" content="#006c98" media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content="#191b1f" media="(prefers-color-scheme: dark)" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="RoomSense" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <title>RoomSenseBoard · 室内环境感知</title>
+  <link rel="manifest" href="/manifest.webmanifest" />
   <link rel="icon" href="/static/favicon.ico" />
+  <link rel="apple-touch-icon" href="/static/icon-180.png" />
   <script src="/static/theme.js"></script>
-    <script src="/static/config.js"></script>
-    <link rel="stylesheet" href="/static/style.css" />
-    <link rel="stylesheet" href="/static/ui/controls.css" />
-    <script src="/static/chart.js" defer></script>
-    <script src="/static/ui/dropdown.js" defer></script>
+  <script src="/static/config.js"></script>
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/ui/controls.css" />
+  <script src="/static/chart.js" defer></script>
+  <script src="/static/ui/dropdown.js" defer></script>
   <script src="/static/app.js" defer></script>
 </head>
 
@@ -107,25 +114,23 @@
       </div>
 
       <section id="dashboard" class="page">
-        <div id="status-cards" class="cards"></div>
+        <div id="status-cards" class="cards gauge-cards"></div>
 
-        <div class="panel chart-panel">
+        <div class="panel chart-panel live-panel">
           <div class="panel-head">
             <h2>实时趋势</h2>
             <div class="panel-actions">
-              <div id="live-metrics" class="metric-chips" role="group" aria-label="趋势指标（最多同时选择 2 个）"></div>
+              <div id="live-metrics" class="metric-chips" role="group" aria-label="趋势指标（可多选）"></div>
               <label class="inline">节点<select id="live-node" aria-label="实时曲线节点"></select></label>
+              <span id="live-window" class="hint" title="曲线从首条数据开始逐秒撑开，累计满 25 分钟后向右滑动">窗口 25 分钟</span>
               <span id="live-updated" class="hint">等待数据…</span>
             </div>
           </div>
-          <div class="chart-wrap">
-            <canvas id="live-chart" role="img" aria-label="最近监控指标曲线"></canvas>
-          </div>
-          <div id="live-legend" class="chart-legend"></div>
+          <div id="live-charts" class="live-grid"></div>
         </div>
 
         <div class="split">
-          <section class="panel">
+          <section class="panel node-panel">
             <div class="panel-head">
               <h2>节点状态</h2>
               <div class="panel-actions">
@@ -134,15 +139,15 @@
               </div>
             </div>
             <div class="table-wrap">
-              <table>
+              <table class="responsive-table">
                 <thead>
                   <tr>
                     <th>节点</th>
-                    <th>位置</th>
                     <th>状态</th>
                     <th>温度</th>
                     <th>湿度</th>
                     <th>CO₂</th>
+                    <th>PM2.5</th>
                     <th>最后上报</th>
                     <th>操作</th>
                   </tr>
@@ -151,13 +156,22 @@
               </table>
             </div>
           </section>
-          <section class="panel">
-            <div class="panel-head">
-              <h2>最近告警</h2>
-              <button id="dashboard-alerts">查看全部</button>
-            </div>
-            <ul id="recent-alerts" class="alert-list"></ul>
-          </section>
+          <div class="side-stack">
+            <section class="panel environment-panel">
+              <div class="panel-head">
+                <h2>环境概览</h2>
+                <span class="hint">全部节点平均</span>
+              </div>
+              <div id="environment-grid" class="environment-grid"></div>
+            </section>
+            <section class="panel alerts-panel">
+              <div class="panel-head">
+                <h2>最近告警</h2>
+                <button id="dashboard-alerts">查看全部</button>
+              </div>
+              <ul id="recent-alerts" class="alert-list"></ul>
+            </section>
+          </div>
         </div>
 
         <section class="panel runtime-summary">
@@ -178,7 +192,7 @@
           <span id="nodes-note" class="hint"></span>
         </div>
         <div class="panel table-wrap">
-          <table>
+          <table class="responsive-table">
             <thead>
               <tr>
                 <th>节点</th>
@@ -205,9 +219,10 @@
         <div class="toolbar">
           <label class="inline">状态
             <select id="alert-filter">
-              <option value="active">活跃（未处理 + 已确认）</option>
+              <option value="active">活跃（未处理 + 已确认 + 已静默）</option>
               <option value="open">未处理</option>
               <option value="acknowledged">已确认</option>
+              <option value="muted">已静默</option>
               <option value="resolved">已恢复</option>
               <option value="all">全部</option>
             </select>
@@ -216,6 +231,11 @@
           <button id="ack-all-alerts" class="primary">全部确认</button>
           <span id="alert-count" class="hint"></span>
         </div>
+        <div id="alert-summary" class="alert-summary" aria-label="告警处理概况"></div>
+        <p class="hint alert-hint">
+          确认会记录处理人和备注并移出未处理角标；静默在到期前保持告警但不再计入未处理；
+          手动关闭只结束本次告警，如果越限仍持续，下一条读数会重新开一条。
+        </p>
         <div id="alert-cards" class="alert-cards"></div>
       </section>
 
@@ -281,15 +301,19 @@
           </div>
           <label class="check"><input id="log-scroll" type="checkbox" checked />自动滚动</label>
           <span id="log-count"></span>
+          <span class="hint">同时打印到服务端终端</span>
         </div>
         <div id="log-output" class="output panel" role="log" aria-label="RoomSenseBoard 日志"></div>
       </section>
 
       <section id="settings" class="page" hidden>
-        <form id="settings-form">
+        <form id="settings-form" class="settings-stack">
           <section class="panel">
             <h2>告警阈值</h2>
-            <p class="hint">超过上限触发警告，越过严重阈值升级为严重告警；回落到阈值内（含回差）自动恢复。</p>
+            <p class="hint">超过上限触发警告，越过严重阈值升级为严重告警；回落到阈值内（含回差）自动恢复。
+              未上报的指标不会被判定。</p>
+
+            <h3 class="settings-group-title">温度与湿度</h3>
             <div class="form-grid">
               <label>温度下限（°C）<input id="set-temp-low" type="number" step="0.5" /></label>
               <label>温度上限（°C）<input id="set-temp-high" type="number" step="0.5" /></label>
@@ -299,10 +323,33 @@
               <label>湿度上限（%RH）<input id="set-humidity-high" type="number" step="1" /></label>
               <label>湿度严重下限（%RH）<input id="set-humidity-critical-low" type="number" step="1" /></label>
               <label>湿度严重上限（%RH）<input id="set-humidity-critical-high" type="number" step="1" /></label>
+            </div>
+
+            <h3 class="settings-group-title">空气质量与噪声</h3>
+            <div class="form-grid">
               <label>CO₂ 上限（ppm）<input id="set-co2-high" type="number" step="50" /></label>
               <label>CO₂ 严重上限（ppm）<input id="set-co2-critical-high" type="number" step="50" /></label>
+              <label>PM2.5 上限（µg/m³）<input id="set-pm25-high" type="number" step="5" /></label>
+              <label>PM2.5 严重上限（µg/m³）<input id="set-pm25-critical-high" type="number" step="5" /></label>
+              <label>噪声上限（dB）<input id="set-noise-high" type="number" step="1" /></label>
+              <label>噪声严重上限（dB）<input id="set-noise-critical-high" type="number" step="1" /></label>
+            </div>
+
+            <h3 class="settings-group-title">光照与节点电量</h3>
+            <div class="form-grid">
+              <label>光照下限（lx）<input id="set-light-low" type="number" step="10" /></label>
+              <label>光照严重下限（lx）<input id="set-light-critical-low" type="number" step="10" /></label>
+              <label>电量下限（V）<input id="set-battery-low" type="number" step="0.05" /></label>
+              <label>电量严重下限（V）<input id="set-battery-critical-low" type="number" step="0.05" /></label>
+            </div>
+
+            <h3 class="settings-group-title">运行参数</h3>
+            <div class="form-grid">
               <label>离线判定（秒）<input id="set-offline" type="number" min="15" max="3600" step="5" /></label>
               <label>数据保留（天）<input id="set-retention" type="number" min="1" max="365" /></label>
+              <label>实时趋势窗口（分钟）<input id="set-live-window" type="number" min="5" max="120" step="5" />
+                <span class="field-hint">默认 25 分钟；首条数据起逐秒撑开，满窗口后向右滑动。</span>
+              </label>
             </div>
             <div class="toolbar">
               <button type="submit" class="primary">保存设置</button>
@@ -316,16 +363,19 @@
           <h2>设备接入</h2>
           <p class="hint">
             RA4M2 节点通过 HTTP POST 上报 JSON；下面的地址与节点密钥可以直接写进固件配置。
-            监听 <code>0.0.0.0</code> 时地址按本机网卡自动推断；部署在域名或反向代理后面时，
-            在下面填写对外地址，面板与上报地址都会改用它。
+            这里填的是“别人访问你”的地址，不是监听地址：<strong>不要填 0.0.0.0</strong>，
+            也不要填 127.0.0.1（只有服务器本机能用）。监听所有网卡时会自动探测公网 IP；
+            探测不到时按本机网卡推断。部署在域名或反向代理后面时，在这里填写对外地址，
+            面板与上报地址都会改用它。
           </p>
           <form id="public-url-form">
             <div class="form-grid">
               <label>对外访问地址<input id="set-public-url" type="url" autocomplete="off"
-                  placeholder="https://panel.example.com:20500" /></label>
+                  placeholder="http://203.0.113.10:20500 或 https://panel.example.com" /></label>
             </div>
             <div class="toolbar">
               <button type="submit" class="primary">保存对外地址</button>
+              <button type="button" id="use-current-url">使用当前访问地址</button>
               <span id="public-url-note" class="hint"></span>
             </div>
           </form>
@@ -344,8 +394,9 @@
         <section class="panel">
           <h2>账号安全</h2>
           <p class="hint">
-            面板使用账号密码登录，密码以 PBKDF2-HMAC-SHA256 派生结果保存在
-            <code>conf/accounts.json</code>，不保存明文。修改密码后其他浏览器上的会话会立即失效。
+            面板使用账号密码登录，口令按项目约定以明文保存在 <code>conf/accounts.json</code>，
+            便于查看与找回；因此任何能读到该文件的人都能看到全部口令，请限制文件访问权限。
+            修改密码后其他浏览器上的会话会立即失效。
           </p>
           <div id="account-info" class="kv-grid"></div>
           <form id="password-form">
@@ -390,6 +441,32 @@
     </form>
     <h3>最近告警</h3>
     <ul id="node-alerts" class="alert-list"></ul>
+  </dialog>
+
+  <dialog id="alert-dialog" tabindex="-1" aria-labelledby="alert-action-title">
+    <div class="dialog-title">
+      <h2 id="alert-action-title">处理告警</h2>
+      <button type="button" data-close="alert-dialog" aria-label="关闭">×</button>
+    </div>
+    <p id="alert-action-message" class="alert-dialog-message"></p>
+    <div id="alert-action-meta" class="kv-grid alert-meta-grid"></div>
+    <label>处理备注（可选）<textarea id="alert-note" rows="3" maxlength="200"
+        placeholder="例如：已开窗通风 / 已通知现场老师 / 传感器待校准"></textarea></label>
+    <label class="inline">静默时长
+      <select id="alert-mute-minutes">
+        <option value="30">30 分钟</option>
+        <option value="60" selected>1 小时</option>
+        <option value="240">4 小时</option>
+        <option value="480">8 小时</option>
+        <option value="1440">24 小时</option>
+      </select>
+    </label>
+    <div class="dialog-actions alert-actions">
+      <button type="button" id="alert-do-ack" class="primary">确认</button>
+      <button type="button" id="alert-do-mute">静默</button>
+      <button type="button" id="alert-do-resolve" class="danger">关闭本次告警</button>
+      <span id="alert-action-note" class="hint"></span>
+    </div>
   </dialog>
 
   <dialog id="delete-dialog" tabindex="-1" aria-labelledby="delete-title">
